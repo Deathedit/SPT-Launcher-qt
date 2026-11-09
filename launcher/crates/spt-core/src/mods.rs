@@ -91,7 +91,9 @@ fn walk(dir: &Path) -> Result<Vec<(PathBuf, Vec<String>)>> {
             let meta = fs::symlink_metadata(entry.path())?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let mut c = comps.clone();
-            c.push(name);
+            // Zips made on Windows sometimes store `BepInEx\plugins\X.dll` as one name;
+            // a backslash can't be part of a Windows file name, so it is a separator
+            c.extend(name.split('\\').filter(|p| !p.is_empty()).map(String::from));
             if meta.is_dir() {
                 stack.push((entry.path(), c));
             } else if meta.is_file() {
@@ -371,6 +373,20 @@ mod tests {
         assert_eq!(
             dests(&p),
             vec![("BepInEx/plugins/MyMod.dll", Part::Client), ("SPT_Runtime/user/mods/mymod/package.json", Part::Server)]
+        );
+    }
+
+    #[test]
+    fn windows_backslash_paths() {
+        let d = tmp("backslash");
+        touch(&d, "BepInEx\\plugins\\BetterBepInEx.dll");
+        assert_eq!(dests(&plan(&d).unwrap()), vec![("BepInEx/plugins/BetterBepInEx.dll", Part::Client)]);
+        let w = tmp("backslash-wrap");
+        touch(&w, "Mod-1.0\\BepInEx\\config\\x.cfg");
+        touch(&w, "Mod-1.0\\BepInEx\\plugins\\X.dll");
+        assert_eq!(
+            dests(&plan(&w).unwrap()),
+            vec![("BepInEx/config/x.cfg", Part::Client), ("BepInEx/plugins/X.dll", Part::Client)]
         );
     }
 
