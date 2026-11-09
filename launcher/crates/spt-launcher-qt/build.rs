@@ -16,6 +16,7 @@ fn main() {
         "qml/Icon.qml".into(),
         "qml/PlayPage.qml".into(),
         "qml/ServerPage.qml".into(),
+        "qml/ModsPage.qml".into(),
         "qml/InstallPage.qml".into(),
         "qml/ProtonPage.qml".into(),
         "qml/SettingsPage.qml".into(),

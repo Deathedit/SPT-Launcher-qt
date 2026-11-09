@@ -4,4 +4,5 @@
 
 pub mod app;
 pub mod launcher;
+mod mods;
 mod work;

@@ -57,6 +57,15 @@ pub mod qobject {
         // tray (launcher-qt.json)
         #[qproperty(bool, tray_enabled, cxx_name = "trayEnabled")]
         #[qproperty(bool, hide_on_play, cxx_name = "hideOnPlay")]
+        // Mods page (sp-mod.com)
+        #[qproperty(QString, forge_results, cxx_name = "forgeResults")]
+        #[qproperty(QString, forge_state, cxx_name = "forgeState")]
+        #[qproperty(QString, forge_error, cxx_name = "forgeError")]
+        #[qproperty(bool, forge_has_more, cxx_name = "forgeHasMore")]
+        #[qproperty(QString, installed_mods, cxx_name = "installedMods")]
+        #[qproperty(QString, other_mods, cxx_name = "otherMods")]
+        #[qproperty(QString, mod_task, cxx_name = "modTask")]
+        #[qproperty(f64, mod_pct, cxx_name = "modPct")]
         type Launcher = super::LauncherRust;
 
         /// A log line: channel is "server", "game" or "task"; level "info", "ok", "warn", "error", "cmd"
@@ -117,6 +126,18 @@ pub mod qobject {
         fn enable_local(self: Pin<&mut Launcher>, enabled: bool);
         #[qinvokable]
         fn set_tray_options(self: Pin<&mut Launcher>, tray: bool, hide_on_play: bool);
+
+        /// sp-mod.com search (or a mod link / id); page > 1 appends
+        #[qinvokable]
+        fn forge_search(self: Pin<&mut Launcher>, query: &QString, page: i32);
+        /// Installs the newest version for the installed SPT, with dependencies
+        #[qinvokable]
+        fn mod_install(self: Pin<&mut Launcher>, id: i32);
+        #[qinvokable]
+        fn mod_remove(self: Pin<&mut Launcher>, id: i32);
+        /// Reloads installed mods and checks sp-mod.com for updates
+        #[qinvokable]
+        fn mods_reload(self: Pin<&mut Launcher>);
 
         #[qinvokable]
         fn run_install(self: Pin<&mut Launcher>, spt_path: &QString, local: bool, steam: bool);
@@ -188,8 +209,17 @@ pub struct LauncherRust {
     task_name: QString,
     tray_enabled: bool,
     hide_on_play: bool,
+    forge_results: QString,
+    forge_state: QString,
+    forge_error: QString,
+    forge_has_more: bool,
+    installed_mods: QString,
+    other_mods: QString,
+    mod_task: QString,
+    mod_pct: f64,
 
     pub(crate) inner: Arc<Mutex<Inner>>,
+    pub(crate) mods: super::mods::Shared,
 }
 
 impl Default for LauncherRust {
@@ -234,7 +264,16 @@ impl Default for LauncherRust {
             task_name: QString::default(),
             tray_enabled: true,
             hide_on_play: true,
+            forge_results: QString::from("[]"),
+            forge_state: QString::from("idle"),
+            forge_error: QString::default(),
+            forge_has_more: false,
+            installed_mods: QString::from("[]"),
+            other_mods: QString::from("[]"),
+            mod_task: QString::default(),
+            mod_pct: -1.0,
             inner: Arc::new(Mutex::new(Inner::default())),
+            mods: Default::default(),
         }
     }
 }
@@ -303,6 +342,22 @@ impl qobject::Launcher {
     }
     pub fn set_tray_options(self: Pin<&mut Self>, tray: bool, hide_on_play: bool) {
         work::set_tray_options(self, tray, hide_on_play);
+    }
+    pub fn forge_search(self: Pin<&mut Self>, query: &QString, page: i32) {
+        super::mods::search(self, query.to_string(), page);
+    }
+    pub fn mod_install(self: Pin<&mut Self>, id: i32) {
+        if id > 0 {
+            super::mods::install(self, id as u64);
+        }
+    }
+    pub fn mod_remove(self: Pin<&mut Self>, id: i32) {
+        if id > 0 {
+            super::mods::remove(self, id as u64);
+        }
+    }
+    pub fn mods_reload(self: Pin<&mut Self>) {
+        super::mods::reload(self);
     }
     pub fn run_install(self: Pin<&mut Self>, spt_path: &QString, local: bool, steam: bool) {
         work::run_install(self, spt_path.to_string(), local, steam);

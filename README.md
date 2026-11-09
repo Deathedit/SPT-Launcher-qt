@@ -20,6 +20,9 @@ Nix port of the `spt-additions` installer from
   3. Applies the downpatch deltas.
   4. Syncs mod bundles.
   5. Starts the game through `umu-run` and Proton.
+- **Mods:** search [sp-mod.com](https://sp-mod.com) or paste a mod link, then install, update and
+  remove client mods. The launcher picks the version for your SPT, installs dependencies, and in
+  client-only mode copies only the BepInEx part.
 - **Server:** start, stop and restart the local `spt-server`, with a live console (filters, stdin).
 - **Install:** installs SPT from your Steam copy of EFT (runs `spt-additions` in the background),
   plus updates and patching.
@@ -107,6 +110,21 @@ Settings are shared with the official launcher (`SPT_Runtime/user/Launcher/Launc
 and with `~/.config/spt-additions/app.conf`. The launcher's own UI state (target host, last profile,
 tray options) lives in `~/.config/spt-additions/launcher-qt.json`.
 
+- **Mods:** on **Mods**, search sp-mod.com or paste a link such as
+  `https://sp-mod.com/mod/1775/wtt-menu-overhaul`, then click **Install**.
+  - **Version:** the launcher picks the newest version that supports your SPT and installs missing
+    dependencies first.
+  - **Where files go:** only files below `BepInEx/plugins|patchers|config` and
+    `SPT_Runtime/user/mods` are copied. Anything else in the archive is ignored.
+  - **Client-only mode:** only the client (BepInEx) part is installed; the server host needs the
+    server part. Server-only mods are refused.
+  - **Updates and removal:** installed mods are recorded in
+    `SPT_Runtime/user/Launcher/spt-launcher-qt-mods.json`. *Check updates* uses the sp-mod.com API,
+    and *Remove* deletes exactly the files that were installed.
+  - **Mods you installed by hand** are listed as "Other mods" and never touched.
+  - **Formats:** zip and 7z work. RAR needs an unfree 7-Zip, so install those by hand.
+  - **Safety:** mods are third-party code from wherever the author hosts them. The VirusTotal
+    links from sp-mod.com are shown in the log.
 - **Remote / Fika host:** on **Play**, switch to *Remote / Fika host* and enter `host:port`.
 - **Tray:** works with StatusNotifierItem tray hosts (KDE, GNOME with AppIndicator, waybar,
   noctalia and others). The tray menu has Show/Hide, Play, Stop game and Quit.
@@ -230,6 +248,9 @@ the dev shell. Environment hooks for testing:
 - `SPT_LAUNCHER_SCREENSHOT=/tmp/x.png` saves a screenshot and quits; `SPT_LAUNCHER_SCREENSHOT_DELAY=ms` sets the delay.
 - `SPT_LAUNCHER_ECHO_LOG=1` copies the logs to stderr.
 - `SPT_LAUNCHER_AUTOLAUNCH=1` launches as soon as it connects.
+- `SPT_LAUNCHER_MOD_INSTALL=<mod id>` installs that sp-mod.com mod when the Mods page opens.
+- `cargo run -p spt-core --example forge_probe -- <mod id or link>` checks the sp-mod.com client
+  and installs into a temp folder.
 - `QT_FORCE_STDERR_LOGGING=1` shows QML errors on stderr.
 
 ### Repository layout
@@ -241,7 +262,8 @@ nix/spt-launcher-qt.nix               launcher package (+ bundled fonts, icons)
 nix/spt-additions.nix                 wrapped installer (withServer flag → spt-additions-client)
 nix/spt-runtime.nix                   buildFHSEnv: spt-server, spt-launcher, spt-fhs
 nix/hpatchz.nix                       HDiffPatch 5.1.3 (not in nixpkgs)
-launcher/crates/spt-core              launcher logic: SPT API, bundles, patching, launch (no Qt)
+launcher/crates/spt-core              launcher logic: SPT API, bundles, patching, launch,
+                                      sp-mod.com client + mod install (no Qt)
 launcher/crates/spt-launcher-qt       cxx-qt bridge + QML UI
 scripts/spt-additions                 the installer (based on upstream 1.2.7)
 scripts/metadata.conf                 URLs used by the installer

@@ -65,6 +65,7 @@ in
     packages = [
       spt-additions
       hpatchz
+      pkgs._7zz
       pkgs.clippy
       pkgs.rustfmt
       pkgs.rust-analyzer

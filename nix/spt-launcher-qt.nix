@@ -16,6 +16,7 @@
   ibm-plex,
   jetbrains-mono,
   hpatchz,
+  _7zz,
   spt-additions, # or spt-additions-client
 }:
 
@@ -88,6 +89,7 @@ let
         lib.makeBinPath [
           spt-additions
           hpatchz
+          _7zz # mod archives
         ]
       }"
     ];

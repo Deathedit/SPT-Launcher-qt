@@ -44,6 +44,7 @@ ApplicationWindow {
     ListModel { id: serverLog }
     ListModel { id: gameLog }
     ListModel { id: taskLog }
+    ListModel { id: modLog }
 
     function stamp() {
         return Qt.formatTime(new Date(), "hh:mm:ss")
@@ -57,7 +58,7 @@ ApplicationWindow {
     Connections {
         target: app
         function onLogLine(channel, level, text) {
-            win.appendLog(channel === "server" ? serverLog : (channel === "task" ? taskLog : gameLog), level, text)
+            win.appendLog(channel === "server" ? serverLog : (channel === "task" ? taskLog : (channel === "mods" ? modLog : gameLog)), level, text)
             if (win.echoLog)
                 console.log("[" + channel + "/" + level + "] " + text)
         }
@@ -295,13 +296,14 @@ ApplicationWindow {
                         Lbl { text: "Game"; Layout.leftMargin: 12; Layout.bottomMargin: 8 }
                         NavItem { idx: "01"; text: "Play"; page: "play"; count: app.connState === "ok" ? JSON.parse(app.profilesJson).length : "" }
                         NavItem { idx: "02"; text: "Server"; page: "server"; count: !app.localEnabled ? "–" : (app.serverState === "running" || app.serverState === "external" ? "on" : "off") }
+                        NavItem { idx: "03"; text: "Mods"; page: "mods"; count: app.modTask !== "" ? "…" : (JSON.parse(app.installedMods).length || "") }
                     }
                     ColumnLayout {
                         spacing: 2
                         Lbl { text: "Setup"; Layout.leftMargin: 12; Layout.bottomMargin: 8 }
-                        NavItem { idx: "03"; text: "Install"; page: "install"; count: app.taskState === "running" ? "…" : "" }
-                        NavItem { idx: "04"; text: "Proton"; page: "proton"; count: JSON.parse(app.protonsJson).length }
-                        NavItem { idx: "05"; text: "Settings"; page: "settings" }
+                        NavItem { idx: "04"; text: "Install"; page: "install"; count: app.taskState === "running" ? "…" : "" }
+                        NavItem { idx: "05"; text: "Proton"; page: "proton"; count: JSON.parse(app.protonsJson).length }
+                        NavItem { idx: "06"; text: "Settings"; page: "settings" }
                     }
                     Item { Layout.fillHeight: true }
 
@@ -341,9 +343,10 @@ ApplicationWindow {
             StackLayout {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                currentIndex: ["play", "server", "install", "proton", "settings"].indexOf(win.view)
+                currentIndex: ["play", "server", "mods", "install", "proton", "settings"].indexOf(win.view)
                 PlayPage { app: app; win: win; log: gameLog }
                 ServerPage { app: app; log: serverLog }
+                ModsPage { app: app; win: win; log: modLog }
                 InstallPage { app: app; win: win; log: taskLog }
                 ProtonPage { app: app; win: win; log: taskLog }
                 SettingsPage { app: app; win: win; log: taskLog }
