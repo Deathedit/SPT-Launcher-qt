@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- SPT launcher: the "tin" brand glyph from Icon.qml on a Field-kit dark tile -->
+  <rect x="8" y="8" width="240" height="240" rx="44" fill="#121110"/>
+  <rect x="9.5" y="9.5" width="237" height="237" rx="42.5" fill="none" stroke="#3d3a34" stroke-width="3"/>
+  <rect x="64" y="101" width="128" height="54" fill="#e3a43c" fill-opacity="0.16"/>
+  <g fill="none" stroke="#e3a43c" stroke-width="15" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="64" y="64" width="128" height="128" rx="16"/>
+    <path d="M64 101 H192 M64 155 H192"/>
+  </g>
+</svg>

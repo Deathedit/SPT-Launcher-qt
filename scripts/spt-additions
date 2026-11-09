@@ -1,0 +1,2311 @@
+#!/usr/bin/env bash
+
+# # # # # # # # # 
+# SPT-ADDITIONS #
+# # # # # # # # # 
+
+# MIT License, Copyright (c) 2026 MadByte
+# See LICENSE file for more details:
+# https://github.com/MadByteDE/SPT-Linux-Guide
+#
+# NixOS port: all native tools (jq, 7zz, xxd, hpatchz, umu-run, dotnet) are
+# provided by the Nix package/shell instead of being downloaded at runtime,
+# the native SPT server/launcher run inside a buildFHSEnv (spt-server /
+# spt-launcher), and self-install/self-update are handled by Nix.
+# Run it with `nix run`, `nix develop` or `nix-shell` - see README.md.
+
+# We don't want to run as root
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "This script is not supposed to be run as root!" >&2
+    exit 1
+fi
+
+# Shell options
+shopt -s extglob
+
+# Make sure to throw an error and exit on SIGINT
+trap int INT; int() { warn "Interrupt received" && m_exit; }
+
+# NixOS: Prefer a stable profile path over an ephemeral /nix/store path, so
+# desktop shortcuts and the SPT launcher config keep working after updates/GC
+resolve_stable_bin() {
+    local name="${1}"
+    local dir; for dir in \
+        "/etc/profiles/per-user/${USER}/bin" \
+        "${HOME}/.nix-profile/bin" \
+        "${XDG_STATE_HOME:-"${HOME}/.local/state"}/nix/profile/bin" \
+        "/run/current-system/sw/bin"; do
+        [[ -x "${dir}/${name}" ]] && printf "%s\n" "${dir}/${name}" && return 0
+    done
+    command -v "${name}" 2>/dev/null
+}
+
+
+# # # # # # #
+# Variables #
+# # # # # # #
+
+# Script info
+TITLE="spt-additions"
+VERSION="1.2.7"
+DATE="2026-10-11"
+
+# ANSI codes
+BOLD="\e[1m" UNDERLINE="\e[2m" RESET="\e[0m"
+RED="\e[31m" GREEN="\e[32m" BLUE="\e[36m" YELLOW="\e[33m" GRAY="\e[90m"
+
+declare -A DIR DEFAULT FILE URL SHORTCUT CONFIG METADATA CACHE
+
+# System directories
+DIR[cwd]="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Data directories
+DIR[data-home]="${XDG_DATA_HOME:-"${HOME}/.local/share"}"
+DIR[data]="${DIR[data-home]}/${TITLE}"
+DIR[icons]="${DIR[data-home]}/icons/hicolor/256x256/apps"
+DIR[shortcuts]="${DIR[data-home]}/applications"
+DIR[runtime]="${DIR[data]}/runtime"
+# Steam directories
+DIR[steam]="${HOME}/.steam/steam"
+DIR[proton]="${DIR[steam]}/compatibilitytools.d"
+# Cache directories
+DIR[cache-home]="${XDG_CACHE_HOME:-"${HOME}/.cache"}"
+DIR[cache]="${DIR[cache-home]}/${TITLE}"
+DIR[files]="${DIR[cache]}/files"
+DIR[metadata]="${DIR[cache]}/metadata"
+DIR[tmp]="${DIR[cache]}/tmp"
+# Config directories
+DIR[config-home]="${XDG_CONFIG_HOME:-"${HOME}/.config"}"
+DIR[config]="${DIR[config-home]}/${TITLE}"
+
+# Default setting variables
+DEFAULT[install-mode]="latest"
+DEFAULT[protonpath]="latest"
+DEFAULT[wineprefix]="${HOME}/Games/SPT-Prefix"
+DEFAULT[env]="PROTON_USE_XALIA=0 PROTON_MEDIA_USE_GST=1"
+DEFAULT[spt-path]="${HOME}/Games/SPT"
+DEFAULT[steam-library]="${DIR[steam]}/steamapps"
+# Install & set up the local SPT server (0 = client only, e.g. for joining a remote/Fika host)
+DEFAULT[server]="$([[ "${SPT_NO_SERVER}" == 1 ]] && echo 0 || echo 1)"
+
+# File path variables
+FILE[script]="${DIR[cwd]}/${TITLE}"
+FILE[log]="${DIR[cache]}/installer.log"
+FILE[umu]="$(resolve_stable_bin umu-run)"
+FILE[spt-server]="$(resolve_stable_bin spt-server)"
+FILE[spt-launcher]="$(resolve_stable_bin spt-launcher)"
+FILE[steam-helper]="${DIR[cwd]}/steam-shortcut.py"
+FILE[config]="${DIR[config]}/app.conf"
+# NixOS: metadata ships with the package (upstream's points to non-Nix scripts)
+FILE[metadata]="${SPT_NIX_METADATA:-"${DIR[cwd]}/metadata.conf"}"
+FILE[spt]="${DIR[files]}/spt.7z"
+FILE[legacy-spt]="${DIR[files]}/legacy-spt.7z"
+FILE[patcher]="${DIR[files]}/patcher.7z"
+FILE[legacy-patcher]="${DIR[files]}/legacy-patcher.7z"
+FILE[mod-json]="${DIR[metadata]}/release.json"
+FILE[patcher-json]="${DIR[metadata]}/mirrors.json"
+
+# Shortcut paths
+SHORTCUT[bsg-launcher]="${DIR[shortcuts]}/BSG - Launcher.desktop"
+SHORTCUT[spt-launcher]="${DIR[shortcuts]}/SPT - Launcher.desktop"
+SHORTCUT[spt-server]="${DIR[shortcuts]}/SPT - Server.desktop"
+
+declare -r DIR DEFAULT FILE URL
+
+
+# # # # # # # # # #
+# Alias functions #
+# # # # # # # # # #
+
+m_exit() {
+    local status=${1:-$?}
+    if [[ ${BASH_SUBSHELL} -eq 0 ]]; then
+        save_array config
+        [[ -d "${DIR[tmp]}" ]] && m_rm -r "${DIR[tmp]}"
+    fi
+    exit "${status}"
+}
+
+
+m_chmod() { chmod "$@" &>> "${FILE[log]}" || err "Command \"chmod $*\" failed" "$?"; }
+m_mkdir() { mkdir -p "$@" &>> "${FILE[log]}" || err "Command \"mkdir -p $*\" failed" "$?"; }
+m_ls() { ls "$@" 2>/dev/null; }
+m_mv() { mv "$@" &>> "${FILE[log]}" || err "Command \"mv $*\" failed" "$?"; }
+m_curl() { curl "$@" || err "Command \"curl $*\" failed" "$?"; }
+m_umu() { "${FILE[umu]}" "$@" 2>> "${FILE[log]}" || err "Command \"umu-run $*\" failed" "$?"; }
+m_7z() { 7zz "$@" 2>> "${FILE[log]}" || err "Command \"7zz $*\" failed" "$?"; }
+m_tar() { tar "$@" 2>> "${FILE[log]}" || err "Command \"tar $*\" failed" "$?"; }
+
+
+m_rm() {
+    local target_path; target_path="${@: -1}"
+    [[ -z "${target_path}" ]] && err "Path variable is empty"
+    check_target_path "${target_path}"
+    rm "$@" || warn "Command \"rm $*\" failed"
+}
+
+
+m_cp() {
+    local source_path="${1}"; local target_path="${2}"
+    check_target_path "${target_path}"
+
+    local progress=1
+    local files_total; files_total=$(find "${source_path}" \( -type f -printf x \) | wc -c)
+
+    if [[ -d "${source_path}" ]]; then
+        # Iterate files & copy to target directory
+        echo; find "${source_path}" \( -type f \) -print0 | while IFS= read -r -d '' source; do
+            local filename="${source/#$source_path}"
+            local output="${target_path}/${filename}"
+            local progress_string="[${progress}/${files_total}]"
+            msg -o "${GRAY}${progress_string} Copying: ${filename##*/}${RESET}"
+            [[ ! -d "${output%/*}" ]] && m_mkdir "${output%/*}"
+            cp --reflink=auto "${source}" "${output}" &>> "${FILE[log]}" || err "Command \"cp $*\" failed" "$?"
+            progress=$((progress+1))
+        done
+    elif [[ -f "${source_path}" ]]; then
+        cp --reflink=auto "${source_path}" "${target_path}" &>> "${FILE[log]}" || err "Command \"cp $*\" failed" "$?"
+    fi
+}
+
+
+m_extract() {
+    local file_path="${1}"; [[ -z "${file_path}" ]] && err "Missing file_path argument"
+    local target_path="${2:-"${file_path%/*}"}"
+    local filename="${file_path##*/}"
+
+    check_target_path "${target_path}"
+    [[ ! -d "${target_path}" ]] && m_mkdir "${target_path}"
+
+    msg "${GRAY}Extracting: ${filename}${RESET}"
+    case "${filename}" in
+        # Extract archive
+        *.zip*|*.7z*) m_7z x -aoa "${file_path}" -o"${target_path}" 1>/dev/null ;;
+        *.tar*) m_tar -xf "${file_path}" -C "${target_path}" 1>/dev/null ;;
+        *.deb*)
+            m_7z x -aoa "${file_path}" -o"${target_path}" 1>/dev/null
+            m_tar -xf "${file_path%/*}/data.tar" -C "${target_path}" 1>/dev/null
+            m_rm "${file_path%/*}/data.tar"
+        ;;
+        *) err "Cannot extract file: \"${file_path}\"" ;;
+    esac
+}
+
+
+m_download() {
+    local force=0; local silent=0; local cmd='m_curl'
+    local opt; for opt in "${@}"; do
+        case ${opt} in
+            -s) silent=1; shift 1 ;;
+            -f) force=1; shift 1 ;;
+            # No immediate error if curl fails
+            -n) cmd='curl'; shift 1 ;;
+        esac
+    done
+    local url="${1}"; [[ -z "${url}" ]] && err "Missing url argument" 
+    local target_path="${2}"; [[ -z "${target_path}" ]] && err "Missing target_path argument"
+    local filename="${url##*/}"
+    local args='--create-dirs --connect-timeout 30'
+    check_target_path "${target_path}"
+
+    if [[ -d "${target_path}" ]]; then target_path="${target_path}/${filename}"
+    else filename="${target_path##*/}"; fi
+
+    if [[ ! -f "${target_path}" || $force -eq 1 ]]; then
+        msg "${GRAY}Downloading: ${filename}...${RESET}"
+        if [[ $silent -eq 1 ]]; then $cmd -sSL $args "${url}" -o "${target_path}"
+        else $cmd -L $args "${url}" -o "${target_path}"; fi
+    fi
+}
+
+
+# # # # # # # # # # #
+# Helper functions  #
+# # # # # # # # # # #
+
+msg() {
+    local mode
+
+    case "$1" in
+        # Override mode
+        -o) mode="override"; shift ;;
+        # Debug mode (only print into log file)
+        -d) mode="debug"; shift ;;
+    esac
+
+    local output="$*"
+    local filtered_str; filtered_str=$(echo -e "${output}" | sed 's/\x1B\[[0-9;]\{1,\}[A-Za-z]//g')
+
+    # Print to terminal
+    if [[ "${mode}" != "debug" ]]; then
+        case ${NO_ANSI} in
+            1) echo "${filtered_str}" ;;
+            *)
+                case ${mode} in
+                    override) echo -e "\r\033[1A\033[0K│ ${output}" ;;
+                    *) echo -e "│ ${output}" ;;
+                esac
+            ;;
+        esac
+    fi
+
+    # Write to log file
+    if [[ -d "${DIR[cache]}" && "${mode}" != "override" ]] ; then
+        echo "[$TITLE] ${filtered_str}" &>> "${FILE[log]}"
+    fi
+}
+
+
+warn() {
+    msg "${BOLD}${YELLOW}Warn: ${RESET}$1"
+}
+
+
+err() {
+    local message="$1"; local status="${2:-"1"}"
+    local pfx="${BOLD}${RED}ERROR ${FUNCNAME[1]}: ${RESET}"
+    msg; msg "${pfx}${message} (Exit code: ${status})" 1>&2
+    msg "   ► See ${BOLD}\"${FILE[log]}\"${RESET} for more details." 1>&2
+    m_exit "$status"
+}
+
+yesno() {
+    msg; msg "${BOLD}${BLUE}[Q] $*${RESET} [y/n] "
+    if [[ $NO_PROMPT == 1 ]]; then msg "NO_PROMPT variable set - returning 0" && return 0; fi
+    while true; do
+        read -r -p "│    ► " yn
+        case $yn in
+            [Yy]*) return 0 ;;  
+            [Nn]*) return 1 ;;
+        esac
+    done
+}
+
+
+resolve_path() {
+    local input="${1}"
+    # Handle tilde expansion for "~"
+    if [[ $input == "~" || $input == "~/"* ]]; then
+        input="${input/#\~/$HOME}"
+    fi
+    # Get real path
+    local path; path="$(realpath -m "${input}")"
+    printf "${path}\n"
+}
+
+
+read_input() {
+    if [[ $NO_PROMPT == 1 ]]; then msg "NO_PROMPT variable set - returning 0" && return 0; fi
+    read -e -r -p "│    ► " input
+    # HACK: Special input check for canceling the action
+    [[ "${input:0:1}" =~ ^[Qq]+$ ]] && return 1
+    printf "${input}\n"
+}
+
+
+load_array() {
+    local path; local array_name="${1}" || err "Missing argument: load_array [array_name]"
+    case "${array_name}" in
+        config) path="${FILE[config]}" ;;
+        metadata) path="${FILE[metadata]}" ;;
+        *) err "Invalid argument \"${array_name}\"";;
+    esac
+
+    # Warn if the file does not exist
+    if [[ ! -f "${path}" ]]; then
+        warn "Failed to load \"${path}\": File does not exist" && return
+    fi
+
+    # Read lines & load values
+    while read -r line; do
+        case "${line}" in
+            *=*) set_value "${array_name}" "${line}" ;;
+            *) err "Cannot load setting \"${line}\": Invalid format" ;;
+        esac
+    done < "${path}"
+}
+
+
+save_array() {
+    local array_name="${1}"
+    [[ ! -d "${DIR[config]}" ]] && return 1
+    case "${array_name}" in
+        config)
+            [[ -f "${FILE[config]}" ]] && m_rm "${FILE[config]}"
+            local key; for key in "${!CONFIG[@]}"; do
+                echo "${key}=\"${CONFIG[$key]}\"" >> "${FILE[config]}"
+            done
+        ;;
+        *) ;;
+    esac
+}
+
+
+load_metadata() {
+    local name="${1}"
+    case "${name}" in
+        mod-latest)
+            load_metadata spt
+            METADATA[mod-path]="${FILE[spt]}"
+            METADATA[mod-eft]=$(jq -r '.Releases[0].ClientVersion' "${FILE[mod-json]}") || err "Failed to get required Live version for SPT" "$?"
+            METADATA[mod-version]=$(jq -r '.Releases[0].SPTVersion' "${FILE[mod-json]}") || err "Failed to get remote SPT version" "$?"
+            METADATA[mod-url1]=$(jq -r '.Releases[0].Mirrors[0].DownloadUrl' "${FILE[mod-json]}") || err "Failed to get SPT download url" "$?"
+            METADATA[mod-url2]=$(jq -r '.Releases[0].Mirrors[1].DownloadUrl' "${FILE[mod-json]}") || err "Failed to get SPT mirror url" "$?"
+            METADATA[mod-hash]=$(jq -r '.Releases[0].Mirrors[0].Hash' "${FILE[mod-json]}") || err "Failed to get SPT archive hash" "$?"
+        ;;
+        patcher-latest)
+            load_metadata spt
+            METADATA[patcher-path]="${FILE[patcher]}"
+            METADATA[patcher-url1]=$(jq -r '.Patches[0].Mirrors[0].Link' "${FILE[patcher-json]}") || err "Failed to get patcher download url" "$?"
+            METADATA[patcher-url2]=$(jq -r '.Patches[0].Mirrors[1].Link' "${FILE[patcher-json]}") || err "Failed to get patcher mirror url" "$?"
+            METADATA[patcher-hash]=$(jq -r '.Patches[0].Mirrors[0].Hash' "${FILE[patcher-json]}") || err "Failed to get patcher hash" "$?"
+            METADATA[patcher-eft]=$(get_patcher_eft_version "${METADATA[patcher-url1]}") || err "Failed to get required Live version for patcher" "$?"
+        ;;
+        mod-legacy)
+            load_metadata spt
+            METADATA[mod-path]="${FILE[legacy-spt]}"
+            METADATA[mod-eft]=$(jq -r '.Releases[1].ClientVersion' "${FILE[mod-json]}") || err "Failed to get required Live version for SPT" "$?"
+            METADATA[mod-version]=$(jq -r '.Releases[1].SPTVersion' "${FILE[mod-json]}") || err "Failed to get remote SPT version" "$?"
+            METADATA[mod-url1]=$(jq -r '.Releases[1].Mirrors[0].DownloadUrl' "${FILE[mod-json]}") || err "Failed to get SPT download url" "$?"
+            METADATA[mod-url2]=$(jq -r '.Releases[1].Mirrors[1].DownloadUrl' "${FILE[mod-json]}") || err "Failed to get SPT mirror url" "$?"
+            METADATA[mod-hash]=$(jq -r '.Releases[1].Mirrors[0].Hash' "${FILE[mod-json]}") || err "Failed to get SPT archive hash" "$?"
+        ;;
+        patcher-legacy)
+            load_metadata spt
+            METADATA[patcher-path]="${FILE[legacy-patcher]}"
+            METADATA[patcher-url1]=$(jq -r '.Patches[1].Mirrors[0].Link' "${FILE[patcher-json]}") || err "Failed to get patcher download url" "$?"
+            METADATA[patcher-url2]=$(jq -r '.Patches[1].Mirrors[1].Link' "${FILE[patcher-json]}") || err "Failed to get patcher mirror url" "$?"
+            METADATA[patcher-hash]=$(jq -r '.Patches[1].Mirrors[0].Hash' "${FILE[patcher-json]}") || err "Failed to get patcher hash" "$?"
+            METADATA[patcher-eft]=$(get_patcher_eft_version "${METADATA[patcher-url1]}") || err "Failed to get required Live version for patcher" "$?"
+        ;;
+        eft)
+            METADATA[inst-eft]=$(get_eft_version) || err "Failed to get Live version" "$?"
+        ;;
+        installed-spt)
+            METADATA[inst-spt]=$(get_spt_version) || err "Failed to get installed SPT version" "$?"
+            METADATA[inst-mod-eft]=$(get_mod_eft_version) || err "Failed to get mod Live version" "$?"
+        ;;
+        spt)
+            # Fetch metadata
+            if ! check_ttl "${FILE[mod-json]}" || ! check_ttl "${FILE[patcher-json]}"; then
+                m_download -f -s "${METADATA[mod-json-url]}" "${FILE[mod-json]}"
+                m_download -f -s "${METADATA[patcher-json-url]}" "${FILE[patcher-json]}"
+            fi
+        ;;
+        "")
+            # NixOS: metadata is part of the package, nothing to download
+            [[ -f "${FILE[metadata]}" ]] || err "Metadata file not found: \"${FILE[metadata]}\""
+            load_array metadata
+        ;;
+        *) err "Invalid argument: \"${name}\"" ;;
+    esac
+}
+
+
+init_prefix() {
+    # Make sure PROTONPATH points to an installed Proton (e.g. resolve "latest"),
+    # umu-run does not accept "latest" as a value
+    check_proton
+
+    if [[ ! -d "${CONFIG[WINEPREFIX]}" ]]; then
+        # Live paths cannot be set in fresh prefixes
+        unset_value config "eft-path"
+        unset_value config "bsg-path"
+
+        msg; msg "${BOLD}Creating wine prefix ...${RESET}" && m_umu wineboot -u
+        m_umu winecfg /v win81 1>> "${FILE[log]}"
+
+        # Add prefix update pop-up workaround
+        msg "${GRAY}Adding \"RUNDLL32\" pop-up workaround...${RESET}"
+        m_umu reg add "HKLM\\Software\\Microsoft\\.NETFramework" /v "OnlyUseLatestCLR" /t "REG_DWORD" /d 0001 /f 1>> "${FILE[log]}"
+
+        # Add mouse focus workaround
+        msg "${GRAY}Adding mouse focus workaround...${RESET}"
+        m_umu reg add "HKCU\\Software\\Wine\\X11 Driver" /v "UseTakeFocus" /t "REG_SZ" /d "N" /f 1>> "${FILE[log]}"
+    fi
+}
+
+
+add_battleye_workaround() {
+    local key='HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\BEService'
+    local binary_path="${CONFIG[eft-path]}/BattlEye/BEService_x64.exe"
+    local dst_dir="${CONFIG[WINEPREFIX]}/drive_c/Program Files (x86)/Common Files/BattlEye"
+
+    msg "${GRAY}Adding BattlEye service workaround (This might take a bit) ...${RESET}"
+    if [[ ! -d "${dst_dir}" ]]; then m_mkdir "${dst_dir}"; fi
+    if [[ ! -f "${dst_dir}/BEService_x64.exe" ]]; then m_cp "${binary_path}" "${dst_dir}/BEService_x64.exe"; fi
+
+    m_umu reg add "${key}" /v DisplayName /t REG_SZ /d "BattlEye Service" /f 1>> "${FILE[log]}"
+    m_umu reg add "${key}" /v ImagePath   /t REG_SZ /d 'C:\Program Files (x86)\Common Files\BattlEye\BEService_x64.exe' /f 1>> "${FILE[log]}"
+    m_umu reg add "${key}" /v ObjectName  /t REG_SZ /d "LocalSystem" /f 1>> "${FILE[log]}"
+    m_umu reg add "${key}" /v ErrorControl       /t REG_DWORD /d 1      /f 1>> "${FILE[log]}"
+    m_umu reg add "${key}" /v PreshutdownTimeout /t REG_DWORD /d 180000 /f 1>> "${FILE[log]}"
+    m_umu reg add "${key}" /v Start              /t REG_DWORD /d 2      /f 1>> "${FILE[log]}"
+    m_umu reg add "${key}" /v Type               /t REG_DWORD /d 16     /f 1>> "${FILE[log]}"
+    m_umu reg add "${key}" /v WOW64              /t REG_DWORD /d 1      /f 1>> "${FILE[log]}"
+}
+
+
+update_eft_path() {
+    local entry; local path
+
+    # Get live install path
+    msg "${GRAY}Checking for existing live install directory...${RESET}"
+    # get windows path
+    [[ ! -f "${CONFIG[WINEPREFIX]}/system.reg" ]] && return 1
+    entry=$(sed -n '/Uninstall\\\\EscapeFromTarkov/,/^$/p' "${CONFIG[WINEPREFIX]}/system.reg")
+    path=$(echo "${entry}" | grep -o "\"UninstallString\"=\"[^}]*" | cut -d "\"" -f4 2>/dev/null)
+    # Convert to unix path
+    path=$(m_umu winepath -u "${path}" 2>/dev/null)
+    
+    if [[ -z "${path}" ]]; then
+        return 1
+    fi
+
+    if [[ -n "${path%/*}" ]]; then
+        msg; msg "${BOLD}Found live install at:${RESET}"
+        msg "   ► ${path%/*}"; msg
+        set_value config "eft-path=${path%/*}"
+    fi
+}
+
+
+update_proton() {
+    case "$1" in
+        -y) local no_prompt=1; shift ;;
+    esac
+    local version="${1:-"latest"}"
+    local url; url=$(m_curl -Lfs -o /dev/null -w %{url_effective} "${METADATA[ge-proton-url]}/${version}" 2>> "${FILE[log]}")
+    [[ $? != 0 || -z "${url}" ]] && err "Invalid Proton version: ${version}"
+    local version="${url##*/}"
+
+    # Skip if the specified version is already installed
+    if [[ -d "${DIR[proton]}/${version}" && -n $(m_ls -A "${DIR[proton]}/${version}") ]]; then
+        msg; msg "${GRAY}${version} is already installed${RESET}"
+    else
+        # Found the given Proton version - ask user to continue
+        msg; msg "${BOLD}${YELLOW}${version} is available!${RESET}"
+        if [[ -z "${no_prompt}" ]]; then yesno "Do you want to install it?" || return 0; fi
+        m_download "${METADATA[ge-proton-url]}/download/${version}/${version}-x86_64.tar.gz" "${DIR[tmp]}"
+        m_extract "${DIR[tmp]}/${version}-x86_64.tar.gz" "${DIR[proton]}"
+        if [[ -d "${DIR[proton]}/${version}-x86_64" ]]; then
+            msg "${GRAY}Renaming Proton directory: \"${version}-x86_64\" to \"${version}\"${RESET}"
+            m_mv "${DIR[proton]}/${version}-x86_64" "${DIR[proton]}/${version}"
+        fi
+    fi
+
+    # Skip if the given version is already set
+    if [[ "${CONFIG[PROTONPATH]}" == "${DIR[proton]}/${version}" ]]; then return 0; fi
+    msg "${GRAY}Setting PROTONPATH to \"${DIR[proton]}/${version}\"${RESET}"
+    set_value config "PROTONPATH=${DIR[proton]}/${version}"
+    return 0
+}
+
+
+create_launcher_config() {
+    local config_dir="${CONFIG[spt-path]}/SPT_Runtime/user/Launcher"
+    local filepath="${config_dir}/LauncherSettings.json"
+    # Create missing directories
+    m_mkdir "${config_dir}"
+    # Create config
+    msg "${GRAY}Creating SPT Launcher configuration...${RESET}"
+    jq . > "${filepath}" <<JSON
+    {
+        "FirstRun": false,
+        "GamePath": "${CONFIG[spt-path]}",
+        "LinuxSettings": {
+            "PrefixPath": "${CONFIG[WINEPREFIX]}",
+            "UmuPath": "${FILE[umu]}",
+            "LaunchSettings": "${DEFAULT[env]}",
+            "ProtonVersion": "${CONFIG[PROTONPATH]}"
+        }
+    }
+JSON
+}
+
+
+spt_download() {
+    local name="${1}" || err "Missing argument: spt_download \"[mod/patcher]\""
+    # Metadata has to be loaded: "load_metadata [latest/legacy]"
+    local path="${METADATA[${name}-path]}"
+    local hash="${METADATA[${name}-hash]}"
+    if ! check_cached "${path}" "${hash}"; then
+        # Json files should always contain two mirrors
+        local i; for i in {1..2}; do
+            local url="${METADATA[${name}-url${i}]}"
+            if m_download -n "${url}" "${path}"; then break
+            else warn "Download failed, retrying from mirror url..."; continue; fi
+            # Both failed? >.<'
+            err "Failed to download ${name}"
+        done
+        check_hash "${path}" "${hash}" || err "File \"${path##*/}\" is corrupted"
+    fi
+}
+
+
+# # # # # # # # # # # # # # # #
+#  Setter / getter functions  #
+# # # # # # # # # # # # # # # #
+
+set_value() {
+    local array_name="${1}"
+    local keyval="${2}" || err "Missing argument: set_value [array_name] [keyval]"
+    local key; key="$(echo "${keyval}" | cut -d '=' -f 1)"
+    local value; value="$(echo "${keyval//["\""]}" | cut -d '=' -f 2-)"
+
+    # Filter for invalid keys
+    if [[ -z "${key}" ]]; then
+        err "Missing key for array \"${array_name}\""
+    elif [[ ! "${key}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        err "Key contains invalid characters: \"${key}\""
+    elif [[ -n "${value}" && ! "${value}" =~ ^[\ A-Za-z0-9/@()/:.,_+=-]+$ ]]; then
+        err "Value contains invalid characters: \"${value}\""
+    fi
+
+    # Set value
+    case "${array_name}" in
+        config)
+            [[ -n "${value}" ]] && CONFIG[$key]="${value%/}"
+            
+            case "${key}" in
+                WINEPREFIX|PROTONPATH) export "${key}=${value%/}" ;;
+            esac
+        ;;
+        metadata) METADATA[$key]="${value}" ;;
+        *) err "Invalid array name: \"${array_name}\""
+    esac
+}
+
+
+unset_value() {
+    local array_name="${1}"
+    local keyval="${2}" || err "Missing argument: set_value [array_name] [keyval]"
+    local key; key="$(echo "${keyval}" | cut -d '=' -f 1)"
+    local value; value="$(echo "${keyval//["\""]}" | cut -d '=' -f 2-)"
+
+    # Filter for invalid keys
+    [[ -z "$key" ]] && err "Missing key: \"${array_name}\""
+
+    # Unset key
+    case "${array_name}" in
+        config) unset CONFIG[$key] ;;
+        *) err "Invalid array name: \"${array_name}\""
+    esac
+}
+
+
+set_spt_path() {
+    local path; path="$(resolve_path "${1%/}")"
+    check_path "${path}"
+    set_value config "spt-path=${path}"
+    msg; msg "${BOLD}SPT path has been set to:${RESET}"
+    msg "   ► ${path}"; msg
+}
+
+
+set_prefix_path() {
+    local path; path="$(resolve_path "${1%/}")"
+
+    # Validate prefix path
+    check_path "${path}"
+    check_prefix_dir "${path}" || err "Given directory is not empty or the prefix is corrupted: \"${path}\""
+        
+    # Update WINEPREFIX environment variables
+    set_value config "WINEPREFIX=${path}"
+    unset_value config "eft-path"
+    unset_value config "bsg-path"
+
+    check_proton
+
+    # Update prefix paths
+    case "${CONFIG[WINEPREFIX]}" in
+        *"steamapps/compatdata/3932890"*)
+            if [[ ! -d "${CONFIG[WINEPREFIX]}" ]]; then
+                warn "Game prefix not found!"
+                msg "   ► ${BOLD}Ensure that the game is installed inside Steam${RESET}"
+                msg "   ► ${BOLD}& that you've run the game at least once for it to create the prefix directory${RESET}"
+                err "Game prefix not found"
+            fi
+            set_value config "bsg-path=${CONFIG[steam-library-path]}/common/Escape from Tarkov/launcher"
+            set_value config "eft-path=${CONFIG[steam-library-path]}/common/Escape from Tarkov/build"
+        ;;
+        *)
+            if [[ -d "${CONFIG[WINEPREFIX]}" ]]; then
+                set_value config "bsg-path=${CONFIG[WINEPREFIX]%/}/drive_c/Battlestate Games/BsgLauncher"
+                [[ -z "${CONFIG[eft-path]}" || ! -d "${CONFIG[eft-path]}" ]] && update_eft_path
+            fi
+        ;;
+    esac
+
+    msg; msg "${BOLD}Prefix path has been set to:${RESET}"
+    msg "   ► ${CONFIG[WINEPREFIX]}"
+}
+
+
+get_steam_game_libraries() {
+    local config_path="${DIR[steam]}/config/libraryfolders.vdf"
+    local paths; paths=$(cat "${config_path}" 2>/dev/null | grep "\"path\"" | cut -d "\"" -f4 2>/dev/null)
+    printf "%s\n" "${paths}"
+}
+
+
+get_patcher_eft_version() {
+    local path="${1}"
+    # Split filename to get version infos from it
+    local filename; filename=$(echo "${path##*/}" | tr "_." " ")
+    local version; version=$(echo "${filename}" | cut -d " " -f6)
+    [[ -z "${version}" ]] && exit 12
+    printf "%s\n" "${version}"
+}
+
+
+get_file_version() {
+    local filepath="${1}"
+    [[ ! -f "${filepath}" ]] && exit 11
+    m_7z l "${filepath}" | grep -o "FileVersion:[^}]*" | head -1 | cut -d " " -f2
+}
+
+
+get_eft_version() { get_file_version "${CONFIG[eft-path]}/EscapeFromTarkov.exe" | cut -d "." -f4; }
+get_mod_eft_version() { get_file_version "${CONFIG[spt-path]}/EscapeFromTarkov.exe" | cut -d "." -f4; }
+get_spt_version() { get_file_version "${CONFIG[spt-path]}/BepInEx/plugins/spt/spt-core.dll" | cut -d "." -f1-3; }
+get_latest_spt_version() { echo "${METADATA[mod-url1]##*/}" | cut -d "-" -f2 2>/dev/null; }
+get_hash() { md5sum "$@" | cut -d ' ' -f 1 | xxd -r -p | base64 2>/dev/null; }
+
+
+# # # # # # # # # # #
+#  Check functions  #
+# # # # # # # # # # #
+
+check_target_path() {
+    local target_path="${1%/}"
+    case "${target_path}" in
+        "") err "Target path is not set" ;;
+        *"${CONFIG[WINEPREFIX]}"* | *"${DIR[data]}"* | *"${DIR[cache]}"* | *"${DIR[icons]}"* | *"${DIR[shortcuts]}"* | *"${CONFIG[spt-path]}"* | \
+        *"${HOME}/.local/bin"* | *"${HOME}/bin"* | *"${DIR[proton]}"* | *"${DIR[config]}"* | *"${DIR[tmp]}"*) ;;
+        *) err "Invalid target directory \"${target_path}\"" ;;
+    esac
+}
+
+
+check_verb() {
+    [[ ! -d "${CONFIG[WINEPREFIX]}" ]] && err "Prefix directory \"${CONFIG[WINEPREFIX]}\" does not exist"
+    if ! cat "${CONFIG[WINEPREFIX]}/winetricks.log" 2>/dev/null | grep -q "$1"; then return 1; fi
+}
+
+
+check_disk_space() {
+    local path="${1}"
+    local total_gb=${2};
+    [[ -z "${path}" ]] && err "Missing path argument"
+    # Get next existing directory path to check available disk space
+    while [[ ! -d "${path}" ]]; do
+        path="${path%/*}"; [[ "${path}" == "" ]] && err "Invalid path: ${path}"
+    done
+    # Get required values
+    local free_kb; free_kb=$(df -k "${path}" | tail -1 | awk '{print $4}')
+    local free_gb; free_gb=$(echo "${free_kb}" | awk '{ free = $1/1024/1024 ; printf("%.2fGiB\n", free) }')
+    # If no total size is defined, use size of the Live game files
+    if [[ -n "${total_gb}" ]]; then
+        local total_kb; total_kb=$((1024*1024*total_gb))
+    else
+        local eft_kb; eft_kb=$(du -cs "${CONFIG[eft-path]}" | head -1 | cut -d$'\t' -f1)
+        total_kb=$((eft_kb + 1024*1024*10))
+    fi
+    total_gb=$(echo "${total_kb}" | awk '{ total = $1/1024/1024 ; printf("%.2fGiB\n", total) }')
+    # Check if there's enough space
+    [[ $free_kb -le $total_kb ]] && err "Not enough free disk space! (${free_gb} free < ${total_gb} needed)"
+    msg -d "Enough free disk space available! (${free_gb} free > ${total_gb} needed)"
+}
+
+
+check_prefix_dir() {
+    local target_path="${1%/}"
+    local check_paths=("${target_path}/system.reg" "${target_path}/dosdevices" "${target_path}/drive_c")
+    # Check directory content
+    if [[ -d "${target_path}" && -n "$(m_ls -A "${target_path}")" ]]; then
+        local path; for path in "${check_paths[@]}"; do
+            [[ ! -f "${path}" ]] && [[ ! -d "${path}" ]] && return 1
+        done
+    fi
+    return 0
+}
+
+
+check_path() {
+    local status=0
+    local path="${1%/}"
+    [[ ! "${path:0:1}" =~ ^[./~]+$ ]] && err "Invalid path format: \"${path}\""
+    path="$(resolve_path "${path}")"
+
+    while true; do
+        [[ -f "${path}" ]] && status=1 && break
+
+        # Check for write permissions
+        local recursive_path="${path}"
+        while [[ ! -d "${recursive_path}" ]]; do
+            recursive_path="${recursive_path%/*}"
+            [[ "${recursive_path}" == "" ]] && status=2 && break
+        done
+        [[ ! -w "${recursive_path}" ]] && status=3 && break
+        break
+    done
+
+    if [[ $status != 0 ]]; then
+        case $status in
+            1) err "Given path is a file: \"${path}\"" ;;
+            2) err "Failed to resolve prefix path: \"${path}\"" ;;
+            3) err "No write permission for directory: \"${path}\"" ;;
+        esac
+    fi
+}
+
+
+check_proton() {
+    msg -d "Checking for Proton..."
+
+    check_proton_installed() {
+        [[ -d "${DIR[proton]}/${CONFIG[PROTONPATH]}" || -d "${CONFIG[PROTONPATH]}" ]]
+    }
+
+    case "${CONFIG[PROTONPATH]}" in
+        *"GE-Proton"*|latest) ;;
+        *)
+            # Reset proton version if needed
+            if ! check_proton_installed; then
+                warn "Invalid Proton path: ${CONFIG[PROTONPATH]}"
+                msg "   ► Defaulting to \"${DEFAULT[protonpath]}\"..."
+                set_value config "PROTONPATH=${DEFAULT[protonpath]}"
+            fi
+        ;;
+    esac
+    if ! check_proton_installed; then
+        update_proton -y "${DEFAULT[protonpath]}"
+    fi
+}
+
+
+check_eft_installed() {
+    [[ -n "${CONFIG[eft-path]}" && -d "${CONFIG[eft-path]}" && -n $(m_ls -A "${CONFIG[eft-path]}") ]] || return 1
+}
+
+
+check_bsg_launcher_installed() {
+    [[ -n "${CONFIG[bsg-path]}" && -f "${CONFIG[bsg-path]}/BsgLauncher.exe" ]]
+}
+
+
+check_spt_installed() {
+    [[ -n "${CONFIG[spt-path]}" ]] && \
+    [[ -d "${CONFIG[spt-path]}" ]] && \
+    [[ -n $(m_ls -A "${CONFIG[spt-path]}") ]]
+}
+
+
+check_latest_installed() {
+    check_spt_installed && [[ -d "${CONFIG[spt-path]}/SPT_Runtime" ]]
+}
+
+
+check_legacy_installed() {
+    check_spt_installed && [[ -d "${CONFIG[spt-path]}/SPT" ]]
+}
+
+
+check_steam_install() {
+    local path; local paths=("${CONFIG[WINEPREFIX]}" "${CONFIG[bsg-path]}" "${CONFIG[eft-path]}")
+    for path in "${paths[@]}"; do [[ "${path}" == *"/steamapps/"* ]] || return 1; done
+}
+
+
+check_native_aspnet() {
+    local version
+    case "${CONFIG[install-mode]}" in
+        latest) version="10.0" ;;
+        legacy) version="9.0" ;;
+    esac
+    if ! dotnet --list-runtimes 2>/dev/null | grep "AspNet" | grep "${version}" &>/dev/null; then
+        warn "\"ASP.NET Runtime ${version}\" is not installed."
+        msg "   ► ASP.NET is ${BOLD}REQUIRED${RESET} to run then SPT Linux server!"
+        yesno "Continue anyway?" || m_exit
+    fi
+}
+
+
+check_native_deps() {
+    # NixOS: every dependency comes from the Nix package / shell
+    local cmds=("curl" "7zz" "xxd" "hpatchz" "jq" "umu-run" "pidof" "python3" "spt-launcher")
+    check_server_enabled && cmds+=("dotnet" "spt-server")
+    local missing=()
+    msg -d "Checking for native dependencies..."
+    local cmd; for cmd in "${cmds[@]}"; do
+        command -v "${cmd}" &>/dev/null || missing+=("${cmd}")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        warn "Missing commands: ${missing[*]}"
+        msg "   ► Run ${TITLE} through Nix instead of calling the script directly:"
+        msg "   ► ${GREEN}nix run .#spt-additions${RESET}, ${GREEN}nix develop${RESET} or ${GREEN}nix-shell${RESET}"
+        err "Missing native dependencies"
+    fi
+
+    # Warn about ephemeral store paths (e.g. when using `nix run`)
+    local path; for path in "${FILE[umu]}" "${FILE[spt-launcher]}" $(check_server_enabled && echo "${FILE[spt-server]}"); do
+        if [[ "${path}" == /nix/store/* ]]; then
+            warn "\"${path##*/}\" is only available from the Nix store (${path%/bin/*})"
+            msg "   ► Shortcuts & launcher settings will break after the next garbage collection."
+            msg "   ► Install it into your profile instead: ${GREEN}nix profile add .#spt-additions${RESET}"
+            msg "   ► (or add it to environment.systemPackages / home.packages)"
+            break
+        fi
+    done
+}
+
+
+check_eft_running() {
+    local apps=("BsgLauncher.exe" "EscapeFromTarko")
+    local app; for app in "${apps[@]}"; do
+        if [[ -z $(pidof "${app}") ]]; then continue; fi
+        warn "It looks like \"${app}\" is currently running on your system!"
+        msg "   ► ${YELLOW} Please close the application & retry.${RESET}"
+        err "\"${app}\" process found"
+    done
+}
+
+
+check_hash() {
+    local file_path="${1%/}"
+    local expected_hash="${2}"
+    # Check arguments
+    [[ ! -f "${file_path}" ]] && err "File \"${file_path}\" does not exist"
+    [[ -z "${expected_hash}" ]] && err "Missing \"expected_hash\" argument"
+    # use file to calculate MD5 hash and ENCODE in base64
+    msg -d "Calculating checksum for file: ${file_path##*/}"
+    local file_hash; file_hash=$(get_hash "${file_path}") || err "Failed to calculate hash"
+    [[ -z "${file_hash}" ]] && err "get_hash returned empty string"
+    # Compare
+    if [[ "${file_hash}" != "${expected_hash}" ]]; then
+        warn "Hash check mismatch (File: \"${file_hash}\" != Expected: \"${expected_hash}\")"
+        return 1
+    fi
+    msg -d "Hash check successful"
+}
+
+
+check_cached() {
+    local cached_path="${1%/}"
+    local expected_hash="${2}"
+    # Make sure the path actually is in CACHE_PATH
+    [[ "${cached_path}" == *"${DIR[cache]}"* ]] || err "File is not in \"${DIR[cache]}\""
+    # Verify the file is there and valid
+    local filename="${cached_path##*/}"
+    if [[ -f "${cached_path}" ]]; then
+        msg "${GRAY}Found \"${filename}\" in cache directory${RESET}"
+        if [[ -n "${expected_hash}" ]] && ! check_hash "${cached_path}" "${expected_hash}"; then
+            msg "${GRAY}Removing cached file \"${filename}\"${RESET}"
+            m_rm "${cached_path}"
+            return 1
+        fi
+    else
+        msg -d "\"${cached_path}\" is not cached"
+        return 1
+    fi
+}
+
+
+check_ttl() {
+    local file_path="${1%/}"
+    local ttl="${2:-"3600"}"
+    # Check if file exists, if not - fail the check
+    [[ ! -f "${file_path}" ]] && return 1
+    # Calculate time elapsed since last modified
+    local current_time; current_time=$(date +%s)
+    local modified_time; modified_time=$(date -r "${file_path}" +%s)
+    ((elapsed_time = current_time - modified_time))
+    # If elapsed time >= TTL - fail the check
+    if [[ $elapsed_time -ge $ttl ]]; then return 1; fi
+}
+
+
+# # # # # # # # # # # # #
+#  Installer functions  #
+# # # # # # # # # # # # #
+
+install_verb() {
+    local verb="${1}"; local text="${2:-"${GRAY}Installing: ${verb}...${RESET}"}"
+    if check_verb "${verb}"; then
+        msg -d "\"${verb}\" is already installed" && return 1
+    fi
+    msg "${GRAY}Installing: ${text}...${RESET}"
+    m_umu winetricks -q "${verb}" 1>> "${FILE[log]}"
+}
+
+
+install_launch_scripts() {
+    # NixOS: the native SPT binaries need the FHS environment provided by the
+    # spt-server / spt-launcher wrappers, so write small scripts calling those
+    local names=("launcher"); check_server_enabled && names+=("server")
+    local name; for name in "${names[@]}"; do
+        local path="${CONFIG[spt-path]}/${name}.sh"
+        msg "${GRAY}Creating \"${name}.sh\"...${RESET}"
+        cat > "${path}" <<SCRIPT || err "Failed to write \"${path}\""
+#!/usr/bin/env bash
+# Generated by ${TITLE} (NixOS) - runs SPT.${name^}.Linux inside the Nix FHS env
+
+# We don't want to run as root
+if [[ "\$( id -u )" -eq 0 ]]; then
+    echo "This script is not supposed to be run as root!" >&2
+    exit 1
+fi
+
+# Started from Steam (non-Steam game): don't leak Steam's overlay / runtime libs
+unset LD_PRELOAD LD_LIBRARY_PATH
+
+cwd="\$(cd -- "\$(dirname -- "\${BASH_SOURCE[0]}")" && pwd)"
+for bin in "\$(command -v spt-${name})" \\
+           "/etc/profiles/per-user/\${USER}/bin/spt-${name}" \\
+           "\${HOME}/.nix-profile/bin/spt-${name}" \\
+           "\${XDG_STATE_HOME:-\${HOME}/.local/state}/nix/profile/bin/spt-${name}" \\
+           "${FILE[spt-${name}]}"; do
+    [[ -n "\${bin}" && -x "\${bin}" ]] && exec "\${bin}" "\${cwd}" "\$@"
+done
+
+echo "ERROR: \"spt-${name}\" not found." >&2
+echo "  ► Install the SPT NixOS package: nix profile add <path-to-SPT-NixOS-Guide>#spt-additions" >&2
+echo "  ► or run: nix run <path-to-SPT-NixOS-Guide>#spt-${name} -- \"\${cwd}\"" >&2
+exit 1
+SCRIPT
+        m_chmod +x "${path}"
+    done
+}
+
+
+install_eft() {
+    msg; msg "${BOLD}Launching live installer...${RESET}"
+
+    if ! check_eft_installed; then check_disk_space "${CONFIG[WINEPREFIX]}" 90; fi
+
+    # Install game dependencies
+    install_verb "dotnet48" ".NET 4.8 Runtime (this might take a while)"
+    install_verb "vcrun2022" "Microsoft Visual C++ 2015-2022 Redistributable"
+
+    # Install live game launcher
+    if ! check_bsg_launcher_installed; then
+        m_download "${METADATA[bsg-launcher-url]}" "${DIR[files]}/BsgLauncher.exe"
+        msg; msg "${BOLD}Installing live game launcher...${RESET}"
+        m_umu "${DIR[files]}/BsgLauncher.exe" /VERYSILENT
+        set_value config "bsg-path=${CONFIG[WINEPREFIX]%/}/drive_c/Battlestate Games/BsgLauncher"
+    fi
+
+    # Download icon to icons directory
+    m_download -s "${METADATA[bsg-ico-url]}" "${DIR[icons]}/bsg_launcher.png"
+
+    # Run live game launcher
+    msg; msg "${BOLD}${BLUE}[A] Please install the game inside the launcher ...${RESET}"
+    msg "   ► When the game is installed, close the launcher to continue${RESET}"; msg
+
+    # WORKAROUND: Ensures that umu cannot guesstimate the game drive (S:)
+    # Otherwise the live install path check can fail
+    export STEAM_COMPAT_INSTALL_PATH="/media/$USER"
+
+    opt_run bsg-launcher || err "Failed to launch \"live game launcher\""
+
+    # Create application shortcut
+    opt_shortcut bsg-launcher
+
+    if update_eft_path; then
+        # Add BattlEye workaround if the game client has been found
+        add_battleye_workaround
+
+        msg; msg "${BOLD}Live has been installed!${RESET}"
+    fi
+}
+
+
+downpatch() {
+    local install_mode="${1}"
+    case "${install_mode}" in
+        latest|legacy);;
+        *) err "Invalid install mode: ${install_mode}" ;; 
+    esac
+
+    local tmp_dir="${DIR[tmp]}/${install_mode}_patcher"
+
+    # Download latest patcher if needed
+    [[ -z "${METADATA[patcher-hash]}" ]] && err "Missing patcher hash argument"
+    spt_download patcher
+
+    # Extract latest patcher to tmp directory
+    m_extract "${METADATA[patcher-path]}" "${tmp_dir}"
+
+    # Copy Live files
+    if [[ ! -d "${CONFIG[spt-path]}" ]]; then
+        msg; msg "${BOLD}Copying game files to \"${CONFIG[spt-path]}\"${RESET}"
+        m_cp "${CONFIG[eft-path]}/" "${CONFIG[spt-path]}"
+    fi
+
+    # Move patcher files to install directory
+    msg; msg "${BOLD}Copying patch files to \"${CONFIG[spt-path]}\"${RESET}"
+    local patch_dir; patch_dir="$(find "${tmp_dir}" -type d -name '*SPT_Patches*')"
+    m_cp "${patch_dir}" "${CONFIG[spt-path]}/SPT_Patches" || err "Failed to copy patch files" 
+
+    # Patch game files
+    opt_patch "${CONFIG[spt-path]}" || err "Failed to patch game files"
+}
+
+
+install_spt() {
+    local install_mode="${CONFIG[install-mode]}"
+    msg "${BOLD}Launching \"SPT\" installer...${RESET}"
+
+    case "${install_mode}" in
+        # Load mod metadata
+        latest|legacy)
+            msg -d "Selected install mode is \"${install_mode}\"..."
+            load_metadata "mod-${install_mode}"
+        ;;
+        *) err "Invalid install mode: ${install_mode}" ;; 
+    esac
+
+    if ! check_eft_installed; then
+        warn "${BOLD}The game client is not installed${RESET}"
+        msg "   ► make sure to install the game inside the live game launcher & try again!"
+        err "Game not found."
+    elif check_spt_installed; then
+        warn "${BOLD}\"${CONFIG[spt-path]}\"${RESET} already exists"
+        msg "   ► If you want to reinstall, make sure to move or delete the current installation first!"
+        err "SPT directory already exists."
+    fi
+
+    check_eft_running
+    if check_server_enabled; then check_native_aspnet
+    else msg "${GRAY}Client-only install: skipping local SPT server setup${RESET}"; fi
+    check_disk_space "${CONFIG[spt-path]}"
+
+    # Install dependencies
+    install_verb "dotnetdesktop9" ".NET Desktop Runtime 9.0"
+
+    # Add DLL overrides
+    opt_dlloverride winhttp n,b
+
+    msg; msg "${BOLD}Installing SPT version: \"${METADATA[mod-version]}\"${RESET}"
+
+    # Downpatch to latest (required for legacy as well)
+    load_metadata "patcher-latest"
+
+    # Check if we need to patch the game files
+    msg -d "Comparing installed Live <--> required Live versions"
+    if [[ "${METADATA[inst-eft]}" -ne "${METADATA[mod-eft]}" ]]; then
+        msg -d "Incompatible Live version found - Checking patcher compatibility..."
+        # Check if target Live version is lower, greater or equal to required Live version
+        if [[ "${METADATA[patcher-eft]}" -lt "${METADATA[inst-eft]}" ]]; then
+            # No patcher available yet!
+            warn "Looks like there's no patcher available for your Live version"
+            msg "   ► This usually happens when Live has been updated recently."
+            msg "   ► Please wait for the SPT team to generate a new patcher."
+            msg "   ► Usually, this will take less then 24 hours."
+            err "No patcher available for version ${METADATA[inst-eft]} (Compatible version: ${METADATA[patcher-eft]})"
+
+        elif [[ "${METADATA[patcher-eft]}" -gt "${METADATA[inst-eft]}" ]]; then
+            # Live is outdated!
+            warn "Looks like your installed Live version is out-of-date"
+            msg "   ► Please update your Live installation & try again"
+            err "Live is out-of-date (Patch: ${METADATA[patcher-eft]} <-> Installed: ${METADATA[inst-eft]})"
+        elif [[ "${METADATA[patcher-eft]}" -eq "${METADATA[inst-eft]}" ]]; then
+            # Downpatcher is compatible!
+            msg -d "Available patcher is compatible"
+            downpatch latest
+        else
+            msg -d "Installed Live version is compatible with \"SPT ${METADATA[mod-version]}\""
+            msg; msg "${GRAY}Copying game files to \"${CONFIG[spt-path]}\"${RESET}"
+            m_cp "${CONFIG[eft-path]}/" "${CONFIG[spt-path]}"
+        fi
+    fi
+
+    if [[ "${install_mode}" == "legacy" ]]; then
+        load_metadata installed-spt
+        load_metadata patcher-legacy
+        case "${METADATA[inst-mod-eft]}" in
+            "${METADATA[patcher-eft]}") downpatch legacy ;;
+            *) err "Incompatible Live version ${METADATA[inst-mod-eft]} (Required: ${METADATA[patcher-eft]})" ;;
+        esac
+    fi
+
+    msg; msg "${BOLD}Done patching game files!${RESET}"
+
+    msg; msg "${BOLD}Installing SPT mod files...${RESET}"
+    spt_download mod
+    m_extract "${METADATA[mod-path]}" "${CONFIG[spt-path]}"
+
+    msg; msg "${BOLD}Finializing SPT install...${RESET}"
+
+    # Set Windows version to 8.1
+    msg "${GRAY}Setting Windows version to \"8.1\"...${GRAY}"
+    m_umu winetricks -q "win81" 1>> "${FILE[log]}"
+
+    # Steam library directory workaround
+    local steam_dir="${CONFIG[WINEPREFIX]}/drive_c/Program Files (x86)/Steam/steamapps"
+    if [[ ! -f "${steam_dir}/libraryfolders.vdf" ]]; then
+        msg "${GRAY}Adding Steam library file workaround...${RESET}"
+        m_mkdir "${steam_dir}"
+        touch "${steam_dir}/libraryfolders.vdf"
+    fi
+
+    case "${install_mode}" in
+        # Create launcher config file
+        latest) create_launcher_config ;;
+    esac
+
+    # Install launch scripts (NixOS: wrappers around spt-server / spt-launcher)
+    install_launch_scripts
+
+    case "${install_mode}" in
+        latest|legacy)
+            # Download & install icons
+            m_download -s "${METADATA[launcher-ico-url]}" "${DIR[icons]}/spt_launcher.png"
+            m_download -s "${METADATA[server-ico-url]}" "${DIR[icons]}/spt_server.png"
+
+            # Create application shortcuts
+            opt_shortcut spt
+        ;;
+    esac
+
+    msg; msg "${BOLD}SPT has been installed!${RESET}"
+}
+
+
+install_fika() {
+    local releases=("fika-core")
+    # The Fika server mod is only needed when hosting the server locally
+    check_server_enabled && releases+=("fika-server")
+    msg "${BOLD}Launching \"Fika\" installer...${RESET}"
+    load_metadata installed-spt
+
+    if ! check_eft_installed; then
+        warn "${BOLD}The game client is not installed${RESET}"
+        msg "   ► make sure to install the game inside the live game launcher & try again!"
+        err "Game not found."
+    elif ! check_spt_installed; then
+        warn "${BOLD}SPT is not installed${RESET}"
+        msg "   ► make sure to install it & try again!"
+        err "SPT not found."
+    elif [[ -d "${CONFIG[spt-path]}/BepInEx/plugins/Fika" ]]; then
+        # Ask for confirmation
+        warn "${BOLD}Fika is already installed${RESET}"
+        yesno "Do you want to update/re-install Fika?" || return 0
+    fi
+
+    local release; for release in "${releases[@]}"; do
+        local json_path="${DIR[metadata]}/${release}.json"
+        local archive_path="${DIR[files]}/${release}.zip"
+        
+        # Get metadata json
+        if check_latest_installed; then
+            check_ttl "${json_path}" || m_download -f -s "${METADATA[${release}-url]}" "${json_path}"
+        elif check_legacy_installed; then
+            check_ttl "${json_path}" || m_download -f -s "${METADATA[${release}-legacy-url]}" "${json_path}"
+        else
+            err "Failed to determine installed SPT version."
+        fi
+
+        # Get archive url
+        local archive_url; archive_url=$(cat "${json_path}" | grep -o "\"browser_download_url\": \"[^}]*" | cut -d "\"" -f4 2>/dev/null)
+        [[ -z "${archive_url}" ]] && err "Failed to get release file URL"
+
+        if [[ "$release" == "fika-core" ]]; then
+            # Get Fika version
+            local fika_version; fika_version=$(echo "${archive_url##*/}" | cut -d "." -f3-5 2>/dev/null)
+            [[ -z "${fika_version}" ]] && err "Failed to get Fika version"
+            msg "${BOLD}Latest Fika version is \"${fika_version}\"${RESET}"
+
+            # SPT-Live compatibility check
+            local compatible_eft; compatible_eft=$(cat "${json_path}" | grep -o "# Compatible with EFT [^}]*" | cut -d " " -f5 2>/dev/null)
+            compatible_eft=$(echo "${compatible_eft}" | cut -d "." -f4 | cut -d "\\" -f1)
+            [[ -z "${compatible_eft}" ]] && err "Failed to get compatible Live version"
+            if [[ "${METADATA[inst-mod-eft]}" -eq "${compatible_eft}" ]]; then msg "Installed SPT-Live version is compatible!"
+            else err "Incompatible Live version (installed: ${METADATA[inst-mod-eft]} != Required: ${compatible_eft})"; fi
+        fi
+
+        # Install archive
+        m_download -f "${archive_url}" "${archive_path}"
+        m_extract "${archive_path}" "${CONFIG[spt-path]}"
+
+    done
+
+    msg; msg "Fika has been installed!"
+}
+
+
+# # # # # # # # # # # # #
+#  Uninstall functions  #
+# # # # # # # # # # # # #
+
+uninstall_eft() {
+    local no_prompt="${1:-$NO_PROMPT}"
+    if check_steam_install; then
+        warn "Steam installation of the game detected!"
+        msg "   ► Please uninstall the game with Steam instead."
+        return 1
+    fi
+
+    # Ask for confirmation
+    if [[ "${no_prompt}" != 1 ]]; then
+        msg "${BOLD}This action will uninstall the game from your system!${RESET}"
+        msg "   ► Client files: ${CONFIG[eft-path]}"
+        msg "   ► Launcher: ${CONFIG[bsg-path]}"
+        yesno "Do you want to continue?" || return 1
+    fi
+
+    msg "Uninstalling live launcher & game files..."
+    m_rm -r "${CONFIG[bsg-path]}"; m_rm -r "${CONFIG[eft-path]}"
+    m_rm -r "${CONFIG[WINEPREFIX]}/drive_c/Battlestate Games"
+
+    msg "Removing \"live game launcher\" shortcut..."
+    [[ -f "${SHORTCUT[bsg-launcher]}" ]] && m_rm "${SHORTCUT[bsg-launcher]}"
+    [[ "${no_prompt}" != 1 ]] && msg "${GREEN}Done!${RESET}"
+}
+
+
+uninstall_spt() {
+    local no_prompt="${1:-$NO_PROMPT}"
+    [[ ! -d "${CONFIG[spt-path]}" ]] && msg "SPT is not installed" && return 0
+
+    # Ask for confirmation
+    if [[ "${no_prompt}" != 1 ]]; then
+        msg "${BOLD}This action will uninstall \"SPT\" from your system!${RESET}"
+        msg "SPT directory: ${UNDERLINE}${CONFIG[spt-path]}${RESET}"
+        yesno "Do you want to continue?" || return 1
+    fi
+
+    msg "Uninstalling \"SPT\"..."
+    m_rm -r "${CONFIG[spt-path]}"
+
+    msg "Removing \"SPT\" shortcuts..."
+    if [[ -d "${DIR[steam]}/userdata" ]] && [[ -z "$(pidof steam)" ]]; then
+        NO_PROMPT=1 opt_steam remove spt &>/dev/null
+    elif [[ -d "${DIR[steam]}/userdata" ]]; then
+        warn "Steam is running - remove the non-Steam \"SPT\" entries manually or run \"${TITLE} steam remove\" later"
+    fi
+    [[ -f "${SHORTCUT[spt-server]}" ]] && m_rm "${SHORTCUT[spt-server]}"
+    [[ -f "${SHORTCUT[spt-launcher]}" ]] && m_rm "${SHORTCUT[spt-launcher]}"
+    [[ "${no_prompt}" != 1 ]] && msg "${GREEN}Done!${RESET}"
+}
+
+
+uninstall_prefix() {
+    local no_prompt="${1:-$NO_PROMPT}"
+    if check_steam_install; then
+        warn "Steam installation of the game detected!"
+        msg "   ► Please uninstall the game inside Steam instead."
+        return 1
+    fi
+    [[ ! -d "${CONFIG[WINEPREFIX]}" ]] && msg "Prefix directory does not exist" && return 0
+    msg "Removing Prefix directory: \"${CONFIG[WINEPREFIX]}\""
+    m_rm -r "${CONFIG[WINEPREFIX]}"
+    [[ "${no_prompt}" != 1 ]] && msg "${GREEN}Done!${RESET}"
+}
+
+
+# # # # # # # # # # # #
+#   Option functions  #
+# # # # # # # # # # # #
+
+opt_install() {
+    # SYNTAX: spt-additions -p ~/Games/SPT install spt 
+    local option="$1" && shift
+    case "${option}" in
+        eft|bsg) install_eft ;;
+        spt) load_metadata eft; install_spt "${CONFIG[install-mode]}" ;;
+        fika) install_fika "${CONFIG[install-mode]}" ;;
+        "") err "Option \"install\" requires an argument" ;;
+        *) err "Invalid option \"${option}\"" ;;
+    esac
+}
+
+
+opt_uninstall() {
+    # SYNTAX: spt-additions -p ~/Games/SPT uninstall spt 
+    local shortcut; local option="$1" && shift
+    case "${option}" in
+        eft|bsg) uninstall_eft ;;
+        spt) uninstall_spt ;;
+        all)
+            # Ask for confirmation
+            if [[ "${NO_PROMPT}" != 1 ]]; then
+                msg "The following directories will be deleted ${BOLD}permanently${RESET}:"
+                msg "   ► ${CONFIG[WINEPREFIX]}"
+                msg "   ► ${CONFIG[eft-path]}"
+                msg "   ► ${CONFIG[spt-path]}"
+                yesno "Do you want to continue?" || return 1
+            fi
+            uninstall_spt 1
+            uninstall_eft 1
+            uninstall_prefix 1
+            [[ "${NO_PROMPT}" != 1 ]] && msg "${GREEN}All done!${RESET}"
+        ;;
+        "") err "Option \"uninstall\" requires an argument" ;;
+        *) err "Invalid option \"${option}\"" ;;
+    esac
+}
+
+
+opt_update() {
+    # SYNTAX: spt-additions -p ~/Games/SPT update spt 
+    local option="$1" && shift
+    case "${option}" in
+        spt)
+            # Get metadata
+            if check_latest_installed; then load_metadata mod-latest
+            elif check_legacy_installed; then load_metadata mod-legacy
+            else msg "SPT is not installed"; return 0; fi
+            
+            load_metadata installed-spt
+            [[ -z "${METADATA[inst-spt]}" ]] && err "Installed SPT version is not set"
+            local latest_version; latest_version="$(get_latest_spt_version)" || err "Failed to get latest SPT version"
+            [[ -z "${latest_version}" ]] && err "latest SPT version is not set"
+
+            msg "${GRAY}Installed SPT version: ${METADATA[inst-spt]}${RESET}"
+            msg "${GRAY}Latest SPT version: ${latest_version}${RESET}"
+            
+            local inst_major; inst_major=$(echo "${METADATA[inst-spt]}" | cut -d "." -f1)
+            local inst_minor; inst_minor=$(echo "${METADATA[inst-spt]}" | cut -d "." -f2)
+            local inst_patch; inst_patch=$(echo "${METADATA[inst-spt]}" | cut -d "." -f3)
+            local upd_major; upd_major=$(echo "${latest_version}" | cut -d "." -f1)
+            local upd_minor; upd_minor=$(echo "${latest_version}" | cut -d "." -f2)
+            local upd_patch; upd_patch=$(echo "${latest_version}" | cut -d "." -f3)
+
+            if [[ "${latest_version}" == "${METADATA[inst-spt]}" ]]; then
+                msg; msg "${BOLD}SPT is up-to-date.${RESET}" && return 0
+            elif [[ "${upd_major}" -gt "${inst_major}" ]]; then
+                {   msg; msg "${BOLD}${YELLOW}A new major update is available!${RESET}"
+                    msg "   ${BOLD}${YELLOW}NOTE${RESET}: User profiles & mods usually are not compatible for major updates."
+                    msg
+                    msg "   ${BOLD}Please check out the release notes & re-install SPT manually:${RESET}"
+                    msg "   ► ${METADATA[spt-release-url]}/tag/${latest_version}"
+                    msg
+                    msg "   1. Update the additions script with: ${GREEN}${TITLE} self-update${RESET}"
+                    msg "   2. Backup or delete your old SPT directory in \"${CONFIG[spt-path]}\""
+                    msg "   3. Update live inside the game launcher"
+                    msg "   4. Re-install SPT using: ${GREEN}${TITLE} install spt${RESET}"
+                } | more
+            elif [[ "${upd_minor}" -gt "${inst_minor}" ]]; then
+                {   msg; msg "${BOLD}${YELLOW}A new minor update is available!${RESET}"
+                    msg "   ${BOLD}${YELLOW}NOTE${RESET}: User profiles & mods might not be compatible."
+                    msg
+                    msg "   ${BOLD}Please check out the release notes & update / re-install SPT manually:${RESET}"
+                    msg "   ► ${METADATA[spt-release-url]}/tag/${latest_version}"
+                    msg
+                    msg "   ${BOLD}How to update:${RESET}"
+                    msg "   1. Download the latest release archive: ${METADATA[mod-url1]}"
+                    msg "   2. Extract its content into \"${CONFIG[spt-path]}\" & override when asked"
+                    msg
+                    msg "   ${BOLD}How to re-install:${RESET}"
+                    msg "   1. Backup or delete your old SPT directory in \"${CONFIG[spt-path]}\""
+                    msg "   2. Update live inside the game launcher"
+                    msg "   3. Re-install SPT using: ${GREEN}${TITLE} install spt${RESET}"
+                }
+            elif [[ "${upd_patch}" -gt "${inst_patch}" ]]; then
+                {   msg; msg "${BOLD}${YELLOW}A new patch update is available!${RESET}"
+                    msg "   ${BOLD}Please check out the release notes:${RESET}"
+                    msg "   ► ${METADATA[spt-release-url]}/tag/${latest_version}"
+                    msg
+                    yesno "Do you want to install the update?" || return 0
+                }
+
+                msg; msg "${BOLD}Installing SPT mod files...${RESET}"
+                spt_download mod
+                m_extract "${METADATA[mod-path]}" "${CONFIG[spt-path]}"
+
+                msg; msg "${BOLD}Update successful!${RESET}"
+            else
+                err "Unhandled exception"
+            fi
+        ;;
+        fika) NO_PROMPT=1 install_fika ;;
+        additions|script) opt_selfupdate ;;
+        ge-proton|proton-ge|proton)
+            [[ -z "${CONFIG[PROTONPATH]}" ]] && err "PROTONPATH is not set"
+            [[ "${CONFIG[PROTONPATH]}" != *"GE-Proton"* ]] && err "GE-Proton is not set in PROTONPATH"
+            update_proton "$@"
+            check_spt_installed && opt_shortcut spt
+            check_eft_installed && opt_shortcut eft
+        ;;
+        "") err "Option \"update\" requires an argument" ;;
+        *) err "Invalid option \"${option}\"" ;;
+    esac
+}
+
+
+opt_patch() {
+    local files_total; local progress=1
+    local target_path="${1:-"${CONFIG[spt-path]}"}";  local source_path="${2:-"${target_path}"}"
+    target_path=$(resolve_path "${target_path%/}"); source_path=$(resolve_path "${source_path%/}" )
+    [[ -z "${target_path}" ]] && err "Target path is not set"
+    [[ ! -d "${target_path}" ]] && err "Target directory \"${target_path}\" does not exist"
+
+    msg; msg "${BOLD}Patching game files in \"${target_path}\"${RESET}"
+
+    # Search in optional SOURCE directory
+    if [ "$(find "${source_path}" -maxdepth 1 -type d -name "SPT_Patches" 2>/dev/null)" ]; then
+        source_path="${source_path}"
+    # Search in TARGET directory
+    elif [ "$(find "${target_path}" -maxdepth 1 -type d -name "SPT_Patches" 2>/dev/null)" ]; then
+        source_path="${target_path}"
+    else
+        err "Unable to locate \"SPT_Patches\" directory in \"${source_path}\""
+    fi
+
+    files_total=$(find "${source_path}/SPT_Patches" \( -type f -printf x \) | wc -c)
+
+    # Iterate files
+    echo; find "${source_path}/SPT_Patches" \( -type f \) -print0 | while IFS= read -r -d '' source; do 
+        local progress_string="[${progress}/${files_total}]"
+        # Isolate the operation extension
+        local extension="${source##*.}"
+        # Isolate sub-directories of SPT_Patches
+        local trimmed="${source#*SPT_Patches/}"
+        # Remove operation extension to get actual file name
+        trimmed="${trimmed%.*}"
+
+        local output="${target_path}/${trimmed}"
+        local target="${output}.decoded"
+        local dir_path="${output%/*}"
+
+        case "$extension" in
+            "delta")
+                msg -o "${GRAY}${progress_string} (*) Patching: ${trimmed##*/}${RESET}"
+                hpatchz "${output}" "${source}" "${target}" >/dev/null 2>> "${FILE[log]}" || return 1
+                # Remove old file and replace with .decoded file
+                [[ ! -f "${target}" ]] && return 1
+                rm "${output}" || return 1
+                m_mv "${target}" "${output}" || return 1
+            ;;
+            "del")
+                msg -o "${GRAY}${progress_string} (-) Deleting: ${trimmed##*/}${RESET}"
+                rm "${output}" || return 1
+                if [[ -z "$(m_ls -A "${dir_path}")" ]]; then
+                    msg -o "${GRAY}${progress_string} (-) Deleting directory: ${dir_path##*/}${RESET}"
+                    rm -r "${dir_path}" || return 1
+                fi
+            ;;
+            "new")
+                msg -o "${GRAY}${progress_string} (+) Adding: ${trimmed##*/}${RESET}"
+                if [[ ! -d "${dir_path}" ]]; then
+                    msg -o "${GRAY}${progress_string} (+) Adding directory: ${dir_path##*/}${RESET}"
+                    m_mkdir "${dir_path}"
+                fi
+                cp "${source}" "${output}" || return 1
+            ;;
+            *) return 1 ;;
+        esac
+        progress=$((progress+1))
+    done
+
+    local status=$?
+    if [[ "$status" -ne "0" ]]; then
+        # Failed patching
+        msg "${GRAY}Removing corrupted game files...${RESET}"
+        m_rm -r "${target_path}" || err "Failed to remove corrupted game files" $status
+        return 1
+    fi
+    
+    # Clean up patcher files
+    if [[ "${target_path}" == *"${source_path}"* ]]; then
+        msg "${GRAY}Cleaning up patch files...${RESET}"
+        [[ -d "${source_path}/SPT_Patches" ]] && m_rm -r "${source_path}/SPT_Patches"
+        [[ -f "${source_path}/patcher.exe" ]] && m_rm -f "${source_path}/patcher.exe"
+    fi
+
+    return 0
+}
+
+
+opt_guided_install() {
+    # Overview
+    {   msg "░█▀▀░█▀█░▀█▀░░░█▀█░█▀▄░█▀▄░▀█▀░▀█▀░▀█▀░█▀█░█▀█░█▀▀"
+        msg "░▀▀█░█▀▀░░█░░░░█▀█░█░█░█░█░░█░░░█░░░█░░█░█░█░█░▀▀█"
+        msg "░▀▀▀░▀░░░░▀░░░░▀░▀░▀▀░░▀▀░░▀▀▀░░▀░░▀▀▀░▀▀▀░▀░▀░▀▀▀"
+        opt_version
+        msg
+        msg "${BOLD}Hello mercenary! ${BLUE}(･_･)ゞ${RESET}"
+        msg
+        msg "${BOLD}${YELLOW}This CLI installer will perform the following steps:${RESET}"
+        msg "   ► Install latest GE-Proton (if not installed already)"
+        msg "   ► Setup the wine prefix, install dependencies & apply game specific workarounds"
+        msg "   ► Install the live game launcher"
+        msg "   ► Install SPT"
+        msg "   ► Add application menu shortcuts"
+    } | more
+    
+    while true; do
+        # Check if Steam version of Live is installed
+        local path; steam_paths=($(get_steam_game_libraries))
+        local steam_install
+        local spt_install_path="${DEFAULT[spt-path]}"
+
+        for path in "${steam_paths[@]}"; do
+            local steam_eft_dir="${path}/steamapps/common/Escape from Tarkov/build"
+            if [[ -n "$(m_ls -A "${steam_eft_dir}")" ]]; then
+                # Found live in a Steam library
+                msg; msg "${BOLD}Found Steam version of the game client in:${RESET}"
+                msg "   ► ${steam_eft_dir}"
+                set_value config "steam-library-path=${path}/steamapps"
+                set_prefix_path "${CONFIG[steam-library-path]}/compatdata/3932890/pfx"
+                init_prefix 
+                steam_install=1
+                break
+            fi
+        done
+
+        if [[ ! "${steam_install}" ]]; then
+            # Choose a custom prefix install location
+            msg; msg "${BOLD}${BLUE}[Q] Where do you want to install the wine prefix (Leave blank for \"${DEFAULT[wineprefix]}\")${RESET}"
+            msg "(Enter ${BOLD}q${RESET} or press ${BOLD}ctrl-c${RESET} to cancel)"
+
+            local input; input=$(read_input) || return 1
+            set_prefix_path "${input:-${DEFAULT[wineprefix]}}"
+            init_prefix 
+        fi
+
+        check_eft_running
+
+        if [[ "${steam_install}" ]]; then
+            # Launch the live game launcher
+            if ! check_eft_installed; then err "Looks like the game client is not installed"; fi
+
+            if command -v steam &>/dev/null; then
+                msg; msg "${BOLD}${BLUE}[A] Launching live game launcher once to create important metadata...${RESET}"
+                msg "   ► Please ensure the launcher works & the \"${GREEN}Play${RESET}\" button is visible."
+                msg "   ► Then close it again to continue..."
+                opt_run bsg-launcher || err "Failed to launch the game with Steam"
+            else
+                warn "Cannot launch Steam on your system!"
+                msg "   ► You might need to launch the game launcher once manually to create important metadata"
+                sleep 3
+            fi
+        else
+            # Ask to skip live installation if it's already installed
+            local inst_eft=1
+            if check_eft_installed; then
+                yesno "Live is already installed. Do you want to skip this step?" \
+                && unset inst_eft
+            fi
+
+            # Install live
+            if [[ "${inst_eft}" ]]; then
+                opt_install eft
+                
+                # Update live path
+                if ! check_eft_installed; then
+                    warn "${YELLOW} Looks like the game is not installed!${RESET}"
+                    msg "   ► Make sure that the game is installed inside the game launcher"
+                    msg "   ► & that you can see the \"${GREEN}Play${RESET}\" button"
+                    err "Failed to get game install path"
+                fi
+
+            fi
+        fi
+
+        if [[ "${steam_install}" && "${CONFIG[steam-library-path]}" != *"${HOME}"* ]]; then 
+            local spt_path; spt_path="$(cd "${CONFIG[steam-library-path]}" && realpath -m "../../" 2>/dev/null)"
+            [[ -z "${spt_path}" ]] && spt_path="${HOME}"
+            spt_install_path="${spt_path%/}/Games/SPT"
+        fi
+
+        # Choose SPT install path
+        msg; msg "${BOLD}${BLUE}[Q] Where do you want to install SPT (Leave blank for \"${spt_install_path}\")${RESET}"
+        msg "(Enter ${BOLD}q${RESET} or press ${BOLD}ctrl-c${RESET} to cancel)"
+        input=$(read_input) || return 1
+        set_spt_path "${input:-${spt_install_path}}"
+
+        # Ask whether the local server should be set up
+        if [[ -z "${SERVER_SET}" && "${NO_PROMPT}" != 1 && "${SPT_NO_SERVER}" != 1 ]]; then
+            if msg && yesno "Do you want to set up the local SPT server? (Answer \"n\" for a client-only install, e.g. to join a remote/Fika host)"; then
+                set_value config "server=1"
+            else
+                set_value config "server=0"
+            fi
+        fi
+
+        # NixOS: shortcuts need spt-server / spt-launcher on a stable profile path
+        if ! check_stable_install; then
+            warn "${TITLE} is running from the Nix store only (e.g. via \"nix run\")"
+            msg "   ► Application shortcuts will only work after installing it into a profile:"
+            msg "   ► ${GREEN}nix profile add <path-to-SPT-NixOS-Guide>#spt-additions${RESET}"
+        fi
+
+        # Install SPT
+        set_value config "install-mode=${DEFAULT[install-mode]}"
+        opt_install spt
+
+        # Ask to add SPT to Steam as a non-Steam game
+        if [[ -d "${DIR[steam]}/userdata" ]]; then
+            if msg && yesno "Do you want to add SPT to Steam as a non-Steam game?"; then
+                opt_steam add spt || warn "Failed to add SPT to Steam"
+            fi
+        fi
+
+        # Ask for desktop shortcuts
+        if command -v "xdg-user-dir" &>/dev/null; then
+            if msg && yesno "Do you want to add additional desktop shortcuts?"; then
+                for path in "${SHORTCUT[@]}"; do
+                    local name="${path##*/}"
+                    local desktop_dir; desktop_dir=$(xdg-user-dir DESKTOP)
+                        msg "Creating \"${name}\" desktop shortcut..."
+                        ln -s -f "${DIR[shortcuts]}/${name}" "${desktop_dir}/${name}"
+                done
+            fi
+        fi
+
+        # If the script does not get installed, we assume the user would probably not
+        # want to keep the large cache files for the install
+        if ! opt_selfinstall; then
+            if msg && yesno "Do you want to clean cached files in \"${DIR[cache]}\"?"; then
+                export NO_PROMPT=1
+                opt_clean metadata; opt_clean files
+            fi
+        fi
+
+        # All done!
+        msg; msg "${BOLD}${GREEN}All done! ※\(^o^)/※${RESET}"
+        msg
+        msg "${BOLD}${BLUE}You need help or just wanna hang out with ${GREEN}THE NERDS${RESET}?:${RESET}"
+        msg "   ${METADATA[discord-url]}"
+        msg
+        msg "${BOLD}${BLUE}Get your favorite mods from ${GREEN}THE FORGE${RESET}:"
+        msg "   ${METADATA[forge-url]}"
+        return 0
+    done
+}
+
+
+opt_run() {
+    # SYNTAX: spt-additions -e MANGOHUD=1 run launcher
+    local option="$1" && shift
+    [[ -z "${option}" ]] && err "Option \"run\" requires an argument"
+    
+    case "${option}" in
+        eft|bsg|bsg-launcher)
+            if ! check_bsg_launcher_installed; then
+                err "live game launcher is not installed (Missing config path or files)"
+            fi
+
+            msg; msg "${BOLD}Launching live game launcher...${RESET}"
+
+            case "${CONFIG[WINEPREFIX]}" in
+                *"steamapps/compatdata/3932890"*)
+                    # Launch the game & wait for the process to show up
+                    steam steam://rungameid/3932890 &>>/dev/null &
+                    local pid; local c; while [[ -z "${pid}" ]]; do
+                        pid="$(pidof -s "BsgLauncher.exe")"
+                        # Timeout
+                        ((c++)) && ((c==60)) && err "Timed out while waiting for live game launcher process"
+                        sleep 2
+                    done
+                    waitpid "${pid}"
+                ;;
+                *)
+                    local args="--disable-software-rasterizer"
+                    cd "${CONFIG[bsg-path]}" && m_umu "BsgLauncher.exe" "$args" "$@"
+                ;;
+            esac
+        ;;
+        launcher)
+            check_eft_running
+            msg "${BOLD}Launching SPT Launcher...${RESET}"
+            cd "${CONFIG[spt-path]}" || exit 1
+            env WINEPREFIX="${CONFIG[WINEPREFIX]}" PROTONPATH="${CONFIG[PROTONPATH]}" "./launcher.sh" "$@" &>> "${FILE[log]}";
+        ;;
+        server)
+            check_eft_running
+            msg "${BOLD}Launching SPT Server...${RESET}"
+            cd "${CONFIG[spt-path]}" || exit 1
+            "./server.sh" "$@"
+        ;;
+        "") err "Option \"run\" requires an argument" ;;
+        *)
+            local cmd; cmd="$(echo "${option} $*" | sed -e 's/[[:space:]]*$//')"
+            msg "Running command: \"${cmd}\"..."
+            m_umu "${option}" "$@"
+        ;;
+    esac
+}
+
+
+opt_dlloverride() {
+    local dll_name="${1}"; local override_type="${2:-"native,builtin"}"
+    [[ -z "${dll_name}" ]] && err "Option \"dlloverride\" requires a DLL name as first argument"
+    [[ ! "${dll_name}" =~ ^[A-Za-z0-9_-]+$ ]] && err "DLL name contains invalid characters: \"${dll_name}\""
+    case "${override_type}" in
+        n|native) override_type="native" ;;
+        b|builtin) override_type="builtin" ;;
+        d|disabled) override_type="disabled" ;;
+        native,builtin|n,b) override_type="native,builtin" ;;
+        builtin,native|b,n) override_type="builtin,native" ;;
+        *) err "Invalid override type \"${override_type}\"" ;;
+    esac
+    msg "${GRAY}Setting \"${dll_name}\" DLL override (${override_type})...${RESET}"
+    m_umu reg add "HKCU\\Software\\Wine\\DllOverrides" /v "${dll_name}" /t "REG_SZ" /d "${override_type}" /f 1>> "${FILE[log]}"
+}
+
+
+add_app_shortcut() {
+    # Check if our cache array is prepared
+    [[ "${CACHE[_id]}" != "app-shortcut" ]] && err "Failed to load shortcut data from cache array"
+    if [[ -f "${CACHE[path]}" ]]; then msg "${GRAY}Updating \"${CACHE[name]}\" application shortcut...${RESET}"
+    else msg "Creating \"${CACHE[name]}\" application shortcut..."; fi
+
+    # Warn if the executable does not exist
+    if [[ ! -f "${CACHE[working_dir]}/${CACHE[exe_path]}" ]]; then
+        warn "File \"${CACHE[working_dir]}/${CACHE[exe_path]}\" does not exist"
+        return 0
+    fi 
+
+    # Remove existing shortcut
+    [[ -f "${CACHE[path]}" ]] && m_rm "${CACHE[path]}"
+
+    # Generate the exec string
+    local exec_string
+    case "${CACHE[exe_path]}" in
+        # Windows executable
+        *exe*|*bat*|*msi*) exec_string="Exec=${CACHE[env]} \"${FILE[umu]}\" \"${CACHE[exe_path]}\" ${CACHE[args]}" ;;
+        # Bash script
+        *sh*) exec_string="Exec=${CACHE[env]} \"${CACHE[working_dir]}/${CACHE[exe_path]}\" ${CACHE[args]}" ;;
+        *) err "Unsupported file format: \"${exe_path##*.}\"" ;;
+    esac
+
+    # Write desktop file
+    {   echo "[Desktop Entry]"
+        echo "Categories=ActionGame;Simulation"
+        echo "Path=${CACHE[working_dir]}"
+        echo "${exec_string}"
+        echo "Name=${CACHE[name]}"
+        echo "Icon=${CACHE[icon]}"
+        echo "Type=Application"
+    } > "${CACHE[path]}" && m_chmod +x "${CACHE[path]}"
+}
+
+
+opt_shortcut() {
+    # SYNTAX: spt-additions -p "" -e "" -a "" shortcut launcher
+    local option="$1" && shift
+    CACHE[_id]="app-shortcut"
+    CACHE[args]=""
+    CACHE[env]=""
+
+    case "${option}" in
+        eft|bsg|bsg-launcher)
+            CACHE[name]="BSG - Launcher"
+            CACHE[exe_path]="BsgLauncher.exe"
+            CACHE[env]="env WINEPREFIX=\"${CONFIG[WINEPREFIX]}\" PROTONPATH=\"${CONFIG[PROTONPATH]}\""
+            CACHE[args]="--disable-software-rasterizer"
+            CACHE[working_dir]="${CONFIG[bsg-path]}"
+            CACHE[icon]="bsg_launcher"
+        ;;
+        launcher)
+            CACHE[exe_path]="launcher.sh"
+            CACHE[working_dir]="${CONFIG[spt-path]}"
+            CACHE[icon]="spt_launcher"
+            # 4.0 uses the windows launcher, so we need proton env vars
+            if check_legacy_installed; then
+                CACHE[name]="SPT 4.0 - Launcher"
+                CACHE[env]="env WINEPREFIX=\"${CONFIG[WINEPREFIX]}\" PROTONPATH=\"${CONFIG[PROTONPATH]}\""
+            else
+                CACHE[name]="SPT - Launcher"
+            fi
+        ;;
+        server)
+            CACHE[exe_path]="server.sh"
+            CACHE[working_dir]="${CONFIG[spt-path]}"
+            CACHE[icon]="spt_server"
+            if check_legacy_installed; then
+                CACHE[name]="SPT 4.0 - Server"
+            else
+                CACHE[name]="SPT - Server"
+            fi
+        ;;
+        spt)
+            opt_shortcut launcher
+            if check_server_enabled; then opt_shortcut server
+            else [[ -f "${SHORTCUT[spt-server]}" ]] && m_rm "${SHORTCUT[spt-server]}"; fi
+            return 0
+        ;;
+        all) opt_shortcut bsg-launcher;  opt_shortcut spt;  return 0 ;;
+        "") err "Option \"shortcut\" requires an argument" ;;
+        *)
+            # Create custom shortcut
+            local exe_path; exe_path=$(resolve_path "${option%/}")
+            [[ ! -f "${exe_path}" ]] && err "File \"${exe_path}\" does not exist"
+            local name="${option##*/}"; name="${name%.*}"
+            local working_dir="${option%/*}"
+            [[ "${working_dir}" == "${option}" ]] && working_dir="${PWD}"
+            CACHE[name]="${name}"
+            CACHE[exe_path]="${option##*/}"
+            CACHE[args]="$*"
+            CACHE[env]="env WINEPREFIX=\"${CONFIG[WINEPREFIX]}\" PROTONPATH=\"${CONFIG[PROTONPATH]}\""
+            CACHE[working_dir]="${working_dir}"
+            CACHE[path]="${DIR[shortcuts]}/${CACHE[name]}.desktop"
+            CACHE[icon]=$(echo "${CACHE[name]}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+        ;;
+    esac
+
+    # Create the shortcut
+    CACHE[path]="${DIR[shortcuts]}/${CACHE[name]}.desktop"
+    add_app_shortcut
+}
+
+
+check_steam_closed() {
+    # Steam rewrites shortcuts.vdf on exit, so it has to be closed while editing
+    while [[ -n "$(pidof steam)" ]]; do
+        warn "Steam is currently running!"
+        msg "   ► Steam overwrites its shortcuts when it exits, so please close it first"
+        msg "   ► (Steam → Exit, not just closing the window)."
+        [[ "${NO_PROMPT}" == 1 ]] && err "Steam is running"
+        yesno "Steam closed? Continue?" || return 1
+    done
+}
+
+
+opt_steam() {
+    # SYNTAX: spt-additions steam [add|remove] [launcher|server|spt]
+    local action="add"
+    case "${1}" in add|remove) action="${1}"; shift ;; esac
+    local target="${1:-spt}"
+    local names=()
+
+    case "${target}" in
+        launcher) names=("launcher") ;;
+        server)
+            if [[ "${action}" == "add" ]] && ! check_server_enabled; then
+                err "Client-only mode is set - use \"--with-server\" to set up the local server"
+            fi
+            names=("server")
+        ;;
+        spt|all)
+            names=("launcher")
+            if [[ "${action}" == "remove" ]] || check_server_enabled; then names+=("server"); fi
+        ;;
+        *) err "Invalid option \"${target}\"" ;;
+    esac
+
+    [[ -d "${DIR[steam]}/userdata" ]] || err "Steam user data not found in \"${DIR[steam]}/userdata\""
+    [[ -f "${FILE[steam-helper]}" ]] || err "Missing helper: \"${FILE[steam-helper]}\""
+    check_steam_closed || return 1
+
+    if [[ "${action}" == "add" ]]; then
+        if ! check_latest_installed && ! check_legacy_installed; then
+            err "SPT is not installed in \"${CONFIG[spt-path]}\""
+        fi
+        # Make sure the launch scripts are up-to-date
+        install_launch_scripts
+    fi
+
+    local name; for name in "${names[@]}"; do
+        local app_name="SPT - ${name^}"
+        local args=(--steam-dir "${DIR[steam]}")
+        [[ -n "${SPT_STEAM_USER}" ]] && args+=(--user "${SPT_STEAM_USER}")
+
+        if [[ "${action}" == "remove" ]]; then
+            msg "Removing \"${app_name}\" from Steam..."
+            python3 "${FILE[steam-helper]}" "${args[@]}" remove --name "${app_name}" 2>> "${FILE[log]}" \
+                | while read -r line; do msg "${GRAY}${line}${RESET}"; done
+            continue
+        fi
+
+        # Artwork
+        local icon="${DIR[icons]}/spt_${name}.png"
+        local cover="${DIR[icons]}/spt_${name}_cover.jpg"
+        m_download -s "${METADATA[${name}-ico-url]}" "${icon}"
+        m_download -n -s "${METADATA[${name}-cover-url]}" "${cover}" || warn "Failed to download cover art"
+
+        msg "Adding \"${app_name}\" to Steam as a non-Steam game..."
+        python3 "${FILE[steam-helper]}" "${args[@]}" add --name "${app_name}" \
+            --exe "${CONFIG[spt-path]}/${name}.sh" --start-dir "${CONFIG[spt-path]}" \
+            --icon "${icon}" --cover "${cover}" --tag "SPT" 2>> "${FILE[log]}" \
+            | while read -r line; do msg "${GRAY}${line}${RESET}"; done
+        [[ "${PIPESTATUS[0]}" -eq 0 ]] || err "Failed to add \"${app_name}\" to Steam"
+    done
+
+    if [[ "${action}" == "add" ]]; then
+        msg; msg "${BOLD}Done! Start Steam & look for \"SPT - Launcher\" in your library.${RESET}"
+        check_server_enabled && msg "   ► Start \"SPT - Server\" first (it opens in a terminal)."
+    fi
+}
+
+
+opt_clean() {
+    # SYNTAX: spt-additions --no-prompt clean runtime metadata
+    if [[ "${#@}" == 0 ]]; then err "Option \"clean\" requires an argument"; fi
+    local paths=()
+
+    local arg; for arg in "${@}"; do
+        case "${arg}" in
+            metadata) paths+=("${DIR[metadata]}") ;;
+            cache) paths+=("${DIR[cache]}") ;;
+            config) paths+=("${DIR[config]}") ;;
+            data) paths+=("${DIR[data]}") ;;
+            runtime) paths+=("${DIR[runtime]}") ;;
+            files) paths+=("${DIR[files]}") ;;
+            all) paths=("${DIR[cache]}" "${DIR[config]}" "${DIR[data]}") ;;
+            *) err "Invalid argument \"${arg}\"" ;;
+        esac
+    done
+
+    # Warn user before continuing
+    if [[ -n "${paths}" ]]; then
+        if [[ "${NO_PROMPT}" != 1 ]]; then
+            {   msg "${BOLD}This action will remove the following files / directories ${YELLOW}permanently${RESET}:"
+                for path in "${paths[@]}"; do msg "   ► ${UNDERLINE}${path}${RESET}"; done
+            } | more
+            yesno "Do you want to continue?" || return 1
+        fi
+        local path; for path in "${paths[@]}"; do
+            msg "Removing: ${path}..."
+            if [[ -f "${path}" ]]; then m_rm "${path}"
+            elif [[ -d "${path}" ]]; then m_rm -r "${path}"; fi
+        done
+        msg "${BOLD}${GREEN}Done!${RESET}"
+    fi
+}
+
+
+check_server_enabled() { [[ "${CONFIG[server]}" != 0 ]]; }
+
+
+check_stable_install() {
+    # True if spt-additions is installed into a Nix profile (not just `nix run`)
+    local stable; stable="$(resolve_stable_bin "${TITLE}")"
+    [[ -n "${stable}" && "${stable}" != /nix/store/* ]]
+}
+
+
+opt_selfinstall() {
+    # NixOS: the script is installed & managed by Nix
+    if check_stable_install; then
+        msg; msg "${BOLD}${TITLE} is installed in:${RESET}"
+        msg "   ► $(resolve_stable_bin "${TITLE}")"
+        return 0
+    fi
+    {   msg; warn "${BOLD}${TITLE} is not installed into a Nix profile${RESET}"
+        msg
+        msg "   ► ${GREEN}${TITLE}${RESET} provides useful CLI commands to manage your wine prefix,"
+        msg "   ► and the SPT shortcuts depend on the ${GREEN}spt-server${RESET} / ${GREEN}spt-launcher${RESET} commands."
+        msg "   ► Install it permanently with one of:"
+        msg "   ► ${GREEN}nix profile add <path-to-SPT-NixOS-Guide>#spt-additions${RESET}"
+        msg "   ► environment.systemPackages / home.packages (see README.md, overlays.default)"
+        msg "   ► Non-flake: ${GREEN}nix-env -if <path-to-SPT-NixOS-Guide> -A spt-additions${RESET}"
+    } | more
+    return 1
+}
+
+
+opt_selfupdate() {
+    # NixOS: updates are handled by Nix
+    msg "${BOLD}${TITLE} is managed by Nix.${RESET}"
+    msg "   ► Update the flake inputs:  ${GREEN}nix flake update${RESET} (in the SPT-NixOS-Guide repo)"
+    msg "   ► Upgrade your profile:     ${GREEN}nix profile upgrade spt-additions${RESET}"
+    msg "   ► or rebuild your NixOS / home-manager configuration."
+    return 1
+}
+
+
+opt_version() {
+    msg "${BOLD}Version: ${RESET}${VERSION}-nix (${DATE}, based on upstream ${VERSION})"
+    local current_hash; current_hash=$(get_hash "${FILE[script]}" 2>/dev/null)
+    [[ -n "${current_hash}" ]] && msg "${BOLD}Hash: ${RESET}${current_hash}"
+}
+
+
+opt_help() {
+    local option="${1}"
+    case "${option}" in
+        install)
+            {   msg "${BOLD}Available options:${RESET}"
+                msg "eft|bsg                        - Install the live game launcher"
+                msg "spt                            - Install SPT"
+                msg "fika                           - Install Fika (core + server mod, core only with --no-server)"
+                msg 
+                msg "${BOLD}SPT install modes (-m switch):${RESET}"
+                msg "latest                         - Install the latest version of SPT"
+                msg "legacy                         - Install the legacy version of SPT"
+                msg
+                opt_help switches
+            } | more
+        ;;
+        uninstall)
+            {   msg "${BOLD}Available options:${RESET}"
+                msg "eft|bsg                        - Uninstall the live game launcher"
+                msg "spt                            - Uninstall SPT"
+                msg "all                            - Uninstall everything (prefix, Live & SPT)"
+                msg
+                opt_help switches
+            } | more
+        ;;
+        update)
+            {   msg "${BOLD}Available options:${RESET}"
+                msg "spt                            - Update SPT to the latest version"
+                msg "fika                           - Update Fika to the latest version"
+                msg "additions|script               - Update this additions script"
+                msg
+                opt_help switches
+            } | more
+        ;;
+        patch)
+            {   msg "Downpatch Live game files to a supported version for SPT"
+                msg 
+                msg "${BOLD}Usage:${RESET}"
+                msg "${YELLOW}$TITLE patch [target_path] [source_path]${RESET}"
+                msg
+                msg "${BOLD}Example:${RESET}"
+                msg "${YELLOW}$TITLE patch \"${DEFAULT[spt-path]}\" \"~/Downloads/patcher\"${RESET}"
+                msg
+                msg "target_path            - Destination install directory (defaults to \"${DEFAULT[spt-path]}\")"
+                msg "source_path            - Directory containing SPT_Patches (defaults to \"target_path\")"
+                msg
+                opt_help switches
+            } | more
+        ;;
+        run)
+            {   msg "Run Live/SPT or custom commands inside the prefix"
+                msg 
+                msg "${BOLD}Usage:${RESET}"
+                msg "${YELLOW}$TITLE [SWITCHES] run [eft|launcher|server|custom_command] [ARGS...]${RESET}"
+                msg
+                msg "${BOLD}Examples:${RESET}"
+                msg "${YELLOW}$TITLE run launcher${RESET}"
+                msg "${YELLOW}$TITLE run winecfg${RESET}"
+                msg "${YELLOW}$TITLE run winetricks [VERBS...]${RESET}"
+                msg "${YELLOW}$TITLE run ./custom.exe --example-arg${RESET}"
+                msg
+                msg "${BOLD}Available options:${RESET}"
+                msg "eft|bsg|bsg-launcher           - Run the live game launcher"
+                msg "launcher                       - Run the SPT Launcher"
+                msg "server                         - Run the SPT Server"
+                msg "custom_command                 - Run a custom command inside the prefix"
+                msg
+                opt_help switches
+            } | more
+        ;;
+        dlloverride)
+            {   msg "Add a DLL override to the wine prefix"
+                msg 
+                msg "${BOLD}Usage:${RESET}"
+                msg "${YELLOW}$TITLE [SWITCHES] dlloverride [DLL_NAME] [override_type]${RESET}"
+                msg
+                msg "${BOLD}Example:${RESET}"
+                msg "${YELLOW}$TITLE dlloverride d3d11 n,b${RESET}"
+                msg
+                opt_help switches
+            } | more
+        ;;
+        steam)
+            {   msg "Add SPT to Steam as a non-Steam game (Steam must be closed)"
+                msg
+                msg "${BOLD}Usage:${RESET}"
+                msg "${YELLOW}$TITLE steam [add|remove] [launcher|server|spt]${RESET}"
+                msg
+                msg "${BOLD}Examples:${RESET}"
+                msg "${YELLOW}$TITLE steam${RESET}                     (add launcher, + server unless --no-server)"
+                msg "${YELLOW}$TITLE steam remove${RESET}"
+                msg "${YELLOW}SPT_STEAM_USER=all $TITLE steam${RESET}  (all Steam accounts, default: most recent login)"
+                msg
+                opt_help switches
+            } | more
+        ;;
+        shortcut)
+            {   msg "${BOLD}Available options:${RESET}"
+                msg "eft|bsg|bsg-launcher           - Create/update live game launcher shortcut"
+                msg "launcher                       - Create/update SPT Launcher shortcut"
+                msg "server                         - Create/update SPT Server shortcut"
+                msg "spt                            - Create/update all SPT shortcuts"
+                msg "all                            - Create/update all available shortcuts"
+                msg "custom_executable              - Create/update custom shortcuts"
+                msg
+                opt_help switches
+            } | more
+        ;;
+        clean)
+            {   msg "Clean installer and prefix files"
+                msg
+                msg "${BOLD}Available options:${RESET}"
+                msg "metadata                       - Remove metadata files"
+                msg "cache                          - Remove all cached files"
+                msg "config                         - Remove configuration files"
+                msg "data                           - Remove installer data files"
+                msg "runtime                        - Remove leftover runtime downloads of the non-Nix script"
+                msg "files                          - Remove cached installer / archive files"
+                msg "all                            - Remove all of the above"
+                msg
+                opt_help switches
+            } | more
+        ;;
+        self-install)
+            {   msg "Show how to install this script into a Nix profile (managed by Nix)"
+                msg 
+            } | more
+        ;;
+        self-update)
+            {   msg "Show how to update this script with Nix (nix flake update / nix profile upgrade)"
+                msg
+            } | more
+        ;;
+        switches)
+            {   msg "${BOLD}Available switches:${RESET}"
+                msg "-p <path>                      - Specify a custom wine prefix path"
+                msg "-s <path>                      - Specify a custom SPT install path"
+                msg "-m <mode>                      - Set the install mode for SPT (latest)"
+                msg "--no-prompt                    - Disable all prompts and assume \"yes\" as answer"
+                msg "--no-ansi                      - Disable ANSI colors in output"
+                msg "--no-server                    - Client-only: skip the local SPT server (remembered)"
+                msg "--with-server                  - Set up the local SPT server again (default)"
+                msg "-h|--help                      - Show help message"
+                msg "-v|--version                   - Show version info"
+            } | more
+        ;;
+        "") 
+            {   msg "${BOLD}${TITLE} - Standalone Live/SPT installer & configuration tool (NixOS)${RESET}"
+                msg
+                msg "${BOLD}Usage:${RESET}"
+                msg "${YELLOW}$TITLE [SWITCHES] <option> [ARGS...]${RESET}"
+                msg
+                msg "${BOLD}Available options:${RESET}"
+                msg "install                        - Install Live/SPT/Fika"
+                msg "uninstall                      - Uninstall Live/SPT"
+                msg "update                         - Update Live/SPT, Proton or this script"
+                msg "run                            - Run Live/SPT or custom commands inside the prefix"
+                msg "dlloverride                    - Add a DLL override to the wine prefix"
+                msg "shortcut                       - Create application menu shortcuts"
+                msg "steam                          - Add/remove SPT as a non-Steam game"
+                msg "patch                          - Downpatch Live game files to a supported version for SPT"
+                msg "clean                          - Clean installer and prefix files"
+                msg "self-install                   - Show how to install this script into a Nix profile"
+                msg "self-update                    - Show how to update this script with Nix"
+                msg "version                        - Print the VERSION info message"
+                msg "help                           - Print this help message or help for a specific option"
+                msg
+                msg "Run \"${BOLD}$TITLE help <option>${RESET}\" for more information about a specific option."
+            } | more
+        ;;
+        *) msg "Invalid option: ${option}" ;;
+    esac
+}
+
+
+# # # # # # # # # # # #
+# Main loop functions #
+# # # # # # # # # # # #
+
+handle_opts() {
+    # Handle switches
+    while getopts ":p:s:e:a:m:h:v:-:" subopt; do
+        case ${subopt} in
+            p) set_prefix_path "${OPTARG}" ;;
+            s) set_spt_path "${OPTARG}" ;;
+            m)
+                case "${OPTARG}" in
+                    latest|legacy)
+                        msg "Setting install mode to \"${OPTARG}\"..."
+                        set_value config "install-mode=${OPTARG}"
+                    ;;
+                    *) err "Invalid mode: ${OPTARG}" ;;
+                esac
+            ;;
+            v) NO_GUIDED=1; opt_version ;;
+            h) NO_GUIDED=1; opt_help ;;
+            -*)
+                case "${OPTARG}" in
+                    no-prompt) export NO_PROMPT=1; msg "\"NO_PROMPT\" option set" ;;
+                    no-ansi) export NO_ANSI=1; msg "\"NO_ANSI\" option set" ;;
+                    no-server) SERVER_SET=1; set_value config "server=0"; msg "Client-only mode set (no local server)" ;;
+                    with-server) SERVER_SET=1; set_value config "server=1"; msg "Local server mode set" ;;
+                    self-install) NO_GUIDED=1; opt_selfinstall ;;
+                    self-update) NO_GUIDED=1; opt_selfupdate ;;
+                    version) NO_GUIDED=1; opt_version ;;
+                    help) NO_GUIDED=1; opt_help ;;
+                    *) err "Invalid switch: --${OPTARG}" ;;
+                esac
+            ;;
+            :)
+                case "${OPTARG}" in
+                    h) NO_GUIDED=1; opt_help ;;
+                    v) NO_GUIDED=1; opt_version ;;
+                    *) err "Switch \"${OPTARG}\" requires an argument" ;;
+                esac
+            ;;
+            *) err "Invalid switch \"-${OPTARG}\"" ;;
+        esac
+    done
+    shift $((OPTIND-1))
+
+    local option="${1}" && shift
+    
+    # Check native dependencies
+    case "${option}" in
+        "") [[ -z "${NO_GUIDED}" ]] && check_native_deps ;;
+        install|shortcut|steam|uninstall|patch|update|dlloverride|run) check_native_deps ;;
+    esac
+
+    # Initialize wine prefix
+    case "${option}" in
+        shortcut|uninstall) set_prefix_path "${CONFIG[WINEPREFIX]}" 1>/dev/null ;;
+        install|update|dlloverride|run) init_prefix ;;
+    esac
+
+    # Handle options
+    case "${option}" in
+        install) opt_install "$@" ;;
+        uninstall) opt_uninstall "$@" ;;
+        update) opt_update "$@" ;;
+        patch) opt_patch "$@" ;;
+        run) opt_run "$@" ;;
+        dlloverride) opt_dlloverride "$@" ;;
+        shortcut) opt_shortcut "$@" ;;
+        steam) opt_steam "$@" ;;
+        clean) opt_clean "$@" ;;
+        self-update) opt_selfupdate ;;
+        self-install) opt_selfinstall ;;
+        version) opt_version ;;
+        help) opt_help "$@";;
+        "") [[ -z "${NO_GUIDED}" ]] && opt_guided_install ;;
+        *) err "Invalid option: ${option}" ;;
+    esac
+}
+
+
+main() {
+    # Create dirs
+    local dirs=("${DIR[tmp]}" "${DIR[data]}" "${DIR[metadata]}" "${DIR[config]}" "${DIR[shortcuts]}" "${DIR[icons]}" "${DIR[files]}")
+    local dir; for dir in "${dirs[@]}"; do [[ ! -d "${dir}" ]] && mkdir -p "${dir}"; done
+
+    # Set default config variables
+    [[ -f "${FILE[config]}" ]] && load_array config
+    set_value config "spt-path=${CONFIG[spt-path]:-${DEFAULT[spt-path]}}" 1>/dev/null
+    set_value config "install-mode=${CONFIG[install-mode]:-"${DEFAULT[install-mode]}"}"
+    set_value config "steam-library-path=${CONFIG[steam-library-path]:-"${DEFAULT[steam-library]}"}"
+    set_value config "server=${CONFIG[server]:-"${DEFAULT[server]}"}"
+    [[ -z "${CONFIG[WINEPREFIX]}" ]] && set_value config "WINEPREFIX=${WINEPREFIX:-"${DEFAULT[wineprefix]}"}"
+    [[ -z "${CONFIG[PROTONPATH]}" ]] && set_value config "PROTONPATH=${PROTONPATH:-"${DEFAULT[protonpath]}"}"
+    
+    # Remove old log file
+    [[ -f "${FILE[log]}" ]] && m_rm "${FILE[log]}"
+
+    # Load metadata (NixOS: shipped with the package)
+    load_metadata
+
+    # Export additional environment variables
+    export WINEDEBUG="${WINEDEBUG:-"+debugstr,err+all,fixme+all"}"
+
+    # NixOS: nix-shell / nix develop point TMPDIR to a private directory
+    # (/tmp/nix-shell-*) which does not exist inside umu's container, breaking
+    # winetricks (mktemp) & friends - fall back to the regular /tmp
+    unset TMP TEMP TEMPDIR
+    export TMPDIR=/tmp
+
+    # NixOS: no self-update, the script is managed by Nix
+
+    # Handle command line arguments
+    handle_opts "$@"
+    m_exit 0
+}
+
+# Main entry
+main "$@"

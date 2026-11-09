@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SPT Launcher
+GenericName=Single Player Tarkov launcher
+Comment=Launch and manage SPT (NixOS)
+Exec=spt-launcher-qt
+Icon=spt-launcher-qt
+Terminal=false
+Categories=Game;
+Keywords=SPT;Tarkov;EFT;
+StartupWMClass=spt-launcher-qt

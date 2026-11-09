@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Tray variant: brand glyph only, pixel-aligned for a 64 px raster (icons/spt-launcher-qt-tray.png) -->
+  <rect x="11" y="25" width="42" height="14" fill="#e3a43c" fill-opacity="0.28"/>
+  <g fill="none" stroke="#e3a43c" stroke-width="6" stroke-linejoin="round">
+    <rect x="8" y="8" width="48" height="48" rx="7"/>
+    <path d="M8 22 H56 M8 42 H56"/>
+  </g>
+</svg>

@@ -1,0 +1,14 @@
+# Nix build outputs
+result
+result-*
+
+# Cargo (the dev shell builds into ~/.cache/spt-launcher-qt/target)
+launcher/target/
+
+# Editors
+*.swp
+.direnv/
+
+# Generated
+__pycache__/
+.qmlls.ini
