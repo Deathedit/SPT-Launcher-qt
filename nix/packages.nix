@@ -36,7 +36,7 @@ in
     spt-launcher-qt-client
     ;
   inherit (runtime) spt-server spt-launcher spt-fhs;
-  default = spt-additions;
+  default = spt-launcher-qt;
 
   shell = pkgs.mkShell {
     # runtimeDeps too, so ./scripts/spt-additions can be run directly while hacking

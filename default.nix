@@ -1,6 +1,6 @@
 # Non-flake entry point:
-#   nix-build -A spt-additions
-#   nix-env -if . -A spt-additions
+#   nix-build                       (spt-launcher-qt)
+#   nix-env -if . -A spt-launcher-qt
 {
   pkgs ? import <nixpkgs> { },
 }:

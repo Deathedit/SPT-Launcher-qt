@@ -1,5 +1,5 @@
 {
-  description = "SPT (Single Player Tarkov) on NixOS: spt-additions installer, FHS-wrapped server & launcher";
+  description = "SPT-Launcher-qt: Rust + Qt launcher & installer for SPT (Single Player Tarkov) on NixOS";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -17,8 +17,8 @@
     in
     {
       packages.${system} = {
+        default = spt.spt-launcher-qt;
         inherit (spt)
-          default
           spt-additions
           spt-additions-client
           spt-server
@@ -31,13 +31,14 @@
       };
 
       apps.${system} = {
-        default = mkApp spt.spt-additions "spt-additions";
+        default = mkApp spt.spt-launcher-qt "spt-launcher-qt";
         spt-additions = mkApp spt.spt-additions "spt-additions";
         spt-additions-client = mkApp spt.spt-additions-client "spt-additions";
         spt-server = mkApp spt.spt-server "spt-server";
         spt-launcher = mkApp spt.spt-launcher "spt-launcher";
         spt-fhs = mkApp spt.spt-fhs "spt-fhs";
         spt-launcher-qt = mkApp spt.spt-launcher-qt "spt-launcher-qt";
+        spt-launcher-qt-client = mkApp spt.spt-launcher-qt-client "spt-launcher-qt";
       };
 
       devShells.${system} = {
