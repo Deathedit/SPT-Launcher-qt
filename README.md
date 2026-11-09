@@ -1,6 +1,6 @@
 # SPT-Launcher-qt
 
-A native **Rust + Qt (QML)** launcher and installer for [SPT (Single Player Tarkov)](https://sp-tarkov.com)
+A native **Rust + Qt (QML)** launcher and installer for [SPT (Single Player Tarkov)](https://github.com/SP-Tushonka)
 on Linux, packaged as a Nix flake for **NixOS**. It replaces `SPT.Launcher.Linux` and comes with a
 Nix port of the `spt-additions` installer from
 [MadByteDE/SPT-Linux-Guide](https://github.com/MadByteDE/SPT-Linux-Guide).
@@ -275,6 +275,6 @@ scripts/steam-shortcut.py             Steam non-Steam game entries
 - The `spt-additions` installer and the Linux groundwork are by **MadByte** and the
   [SPT-Linux-Guide contributors](https://github.com/MadByteDE/SPT-Linux-Guide#credits).
 - Thanks to the NixOS folks in [PR #14](https://github.com/MadByteDE/SPT-Linux-Guide/pull/14).
-- [SPT](https://sp-tarkov.com) is made by the SPT team.
+- [SPT](https://github.com/SP-Tushonka) is made by the SPT team.
 
 MIT licensed, see [LICENSE](LICENSE). Help & community: [SPT Discord](https://discord.com/invite/Xn9msqQZan).
